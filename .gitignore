@@ -1,0 +1,8 @@
+volumes/
+src/*
+registry/docker
+traefik/access.log
+traefik/acme
+traefik/certs/*.pem
+homes/*
+ps/*
