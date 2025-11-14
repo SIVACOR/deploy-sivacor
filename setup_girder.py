@@ -7,14 +7,14 @@ import sys
 
 params = {
     "login": "admin",
-    "email": "root@dev.null",
-    "firstName": "John",
-    "lastName": "Doe",
-    "password": "arglebargle123",
+    "email": "root@sivacor.org",
+    "firstName": "Deus",
+    "lastName": "Ex Machina",
+    "password": "XWgnWW7R",
     "admin": True,
 }
 headers = {"Content-Type": "application/json", "Accept": "application/json"}
-domain = os.environ.get("domain", "local.xarthisius.xyz")
+domain = os.environ.get("domain", "sivacor.org")
 
 
 def final_msg():
@@ -60,7 +60,7 @@ print("Setting up Plugin")
 settings = [
     {
         "key": "core.cors.allow_origin",
-        "value": f"http://localhost:4200,https://sivacor.{domain}",
+        "value": f"http://localhost:4200,https://submit.{domain}",
     },
     {
         "key": "core.cors.allow_headers",
@@ -83,7 +83,16 @@ settings = [
         "value": os.environ.get("ORCID_CLIENT_SECRET"),
     },
     {"key": "oauth.providers_enabled", "value": ["globus", "orcid"]},
+    {
+        "key": "sivacor.tro_gpg_fingerprint",
+        "value": os.environ.get("GIRDER_SIVACOR_TRO_GPG_FINGERPRINT")
+    },
+    {
+        "key": "sivacor.tro_gpg_passphrase",
+        "value": os.environ.get("GIRDER_SIVACOR_TRO_GPG_PASSPHRASE")
+    },
 ]
+
 
 r = requests.put(
     api_url + "/system/setting", headers=headers, params={"list": json.dumps(settings)}

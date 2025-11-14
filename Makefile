@@ -1,5 +1,5 @@
 .PHONY: clean dirs dev images \
-	restart_worker restart_girder status update_src certs
+	restart_worker restart_girder status update_src 
 
 SUBDIRS = src volumes/base volumes/licenses volumes/tmp
 TAG = latest
@@ -15,20 +15,6 @@ images:
 	docker pull node:carbon-slim
 	docker pull xarthisius/girder:$(TAG)
 
-.env:
-	curl -s -o .env https://wt.xarthisius.xyz/wt_local_env
-
-traefik/certs:
-	mkdir -p traefik/certs
-
-traefik/certs/fullchain.pem: traefik/certs
-	curl -s -o traefik/certs/fullchain.pem https://wt.xarthisius.xyz/wt_local_cert
-
-traefik/certs/privkey.pem: traefik/certs
-	curl -s -o traefik/certs/privkey.pem https://wt.xarthisius.xyz/wt_local_key
-
-certs: .env traefik/certs/fullchain.pem traefik/certs/privkey.pem
-
 dirs: $(SUBDIRS)
 
 $(SUBDIRS):
@@ -36,7 +22,7 @@ $(SUBDIRS):
 
 services: dirs
 
-dev: services certs
+dev: services 
 	. ./.env && docker stack config --compose-file docker-stack.yml | docker stack deploy --compose-file - wt
 	cid=$$(docker ps --filter=name=wt_girder -q);
 	while [ -z $${cid} ] ; do \
@@ -63,7 +49,6 @@ reset_girder:
 		python3 -c 'from girder.models import getDbConnection;getDbConnection().drop_database("girder")'
 
 clean:
-	-./destroy_instances.py
 	-docker stack rm wt
 	limit=15 ; \
 	until [ -z "$$(docker service ls --filter label=com.docker.stack.namespace=wt -q)" ] || [ "$${limit}" -lt 0 ]; do \

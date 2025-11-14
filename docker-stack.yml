@@ -1,29 +1,6 @@
 services:
-  sivacor:
-    networks:
-      - traefik-net
-    image: node:22
-    working_dir: /app
-    volumes:
-      - /home/xarth/codes/sivacor/aea-sivacor:/app
-    user: "1001:1001"
-    entrypoint: ["/bin/bash", "-c", "npm run dev"]
-    deploy:
-      replicas: 1
-      labels:
-        - "traefik.enable=true"
-        - "traefik.docker.network=wt_traefik-net"
-        - "traefik.http.routers.sivacor.rule=Host(`sivacor.${domain}`)"
-        - "traefik.http.routers.sivacor.entrypoints=websecure"
-        - "traefik.http.routers.sivacor.tls=true"
-        - "traefik.http.routers.sivacor.service=sivacor"
-        - "traefik.http.services.sivacor.loadbalancer.server.port=4200"
-        - "traefik.http.services.sivacor.loadbalancer.passhostheader=true"
-    extra_hosts:
-      - "girder.${domain}:host-gateway" # for the local queue
-
   traefik:
-    image: traefik:v2.4
+    image: traefik:v3.6
     ports:
       - target: 80
         published: 80
@@ -33,29 +10,43 @@ services:
         published: 443
         protocol: tcp
         mode: host
-      - target: 8080
-        published: 8080
-        protocol: tcp
+      - "8888:8888"
     networks:
-      - traefik-net
+      - proxy
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - ./traefik:/etc/traefik
-      - ./traefik/certs/fullchain.pem:/cert.pem
-      - ./traefik/certs/privkey.pem:/key.pem
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /etc/localtime:/etc/localtime:ro
+      - ./traefik/acme.json:/acme.json:rw
+      - ./traefik/config.yml:/config.yml:ro
     deploy:
       replicas: 1
       labels:
-        - "traefik.enable=false"
+        - traefik.enable=true
+        - traefik.http.routers.traefik.entrypoints=http
+        - traefik.http.routers.traefik.rule=Host(`traefik.sivacor.org`)
+        - traefik.http.middlewares.traefik-auth.basicauth.users=admin:$$2y$$05$$yPv8h3.V9P2MQqN08JHhcuTvcJmmyz4O84oRuBqoHerczO2tQJ8sG
+        - traefik.http.middlewares.traefik-https-redirect.redirectscheme.scheme=https
+        - traefik.http.middlewares.sslheader.headers.customrequestheaders.X-Forwarded-Proto=https
+        - traefik.http.routers.traefik.middlewares=traefik-https-redirect
+        - traefik.http.routers.traefik-secure.entrypoints=https
+        - traefik.http.routers.traefik-secure.rule=Host(`traefik.sivacor.org`)
+        - traefik.http.routers.traefik-secure.middlewares=traefik-auth
+        - traefik.http.routers.traefik-secure.tls=true
+        - traefik.http.routers.traefik-secure.tls.certresolver=cloudflare
+        - traefik.http.routers.traefik-secure.tls.domains[0].main=sivacor.org
+        - traefik.http.routers.traefik-secure.tls.domains[0].sans=*.sivacor.org
+        - traefik.http.routers.traefik-secure.service=api@internal
+        - traefik.http.services.traefik.loadbalancer.server.port=888
       placement:
         constraints:
           - "node.role == manager"
     environment:
-      - TRAEFIK_PROVIDERS_DOCKER_DEFAULTRULE="Host(`\{\{ trimPrefix `/` .Name \}\}.${domain}`)"
+      - CF_DNS_API_TOKEN=${CF_DNS_API_TOKEN}
     command:
       - "--accesslog=true"
       - "--accesslog.format=json"
       - "--accesslog.filepath=/dev/stdout"
+      - "--configFile=/config.yml"
 
   mongo:
     image: mongo:4.4
@@ -69,14 +60,32 @@ services:
       labels:
         - "traefik.enable=false"
 
+  submit:
+    networks:
+      - proxy
+    image: xarthisius/aea-sivacor:latest
+    deploy:
+      replicas: 1
+      labels:
+        - "traefik.enable=true"
+        - "traefik.swarm.network=wt_proxy"
+        - "traefik.http.routers.submit.rule=Host(`submit.${domain}`)"
+        - "traefik.http.routers.submit.entrypoints=https"
+        - "traefik.http.routers.submit.tls=true"
+        - "traefik.http.routers.submit.service=submit"
+        - "traefik.http.services.submit.loadbalancer.server.port=3000"
+        - "traefik.http.services.submit.loadbalancer.passhostheader=true"
+    extra_hosts:
+      - "girder.${domain}:host-gateway" # for the local queue
+
   local_worker:
-    image: xarthisius/girder:5-dev
+    image: docker.io/xarthisius/girder-sivacor:latest
     networks:
       - celery
       - mongo
     volumes:
       - ./volumes:/srv/data
-      - /home/xarth/codes/sivacor/girder-sivacor:/girder-plugins/01-girder-sivacor
+      - /home/ubuntu/.gnupg:/home/girder/.gnupg
       - /tmp:/tmp
     environment:
       - DOMAIN=${domain}
@@ -86,27 +95,26 @@ services:
       - GIRDER_WORKER_BACKEND=redis://redis/
       - GIRDER_NOTIFICATION_REDIS_URL=redis://redis:6379/
       - GIRDER_LOCAL_FONTELLO_ARCHIVE=/girder/clients/web/static/built/fontello.zip
-      - GOSU_USER=1001:1001:${docker_group}
+      - GOSU_USER=1000:1000:${docker_group}
       - HOSTDIR=/
+      - GIRDER_SIVACOR_TRO_GPG_PASSPHRASE=${GIRDER_SIVACOR_TRO_GPG_PASSPHRASE}
+      - GIRDER_SIVACOR_TRO_GPG_FINGERPRINT=${GIRDER_SIVACOR_TRO_GPG_FINGERPRINT}
     extra_hosts:
       - "girder.${domain}:host-gateway" # for the local queue
-    working_dir: /girder-plugins   # for reload
-    entrypoint: ["/sbin/tini", "--", "/docker-entrypoint-worker.sh"]
+    entrypoint: ["/usr/bin/tini", "--", "celery", "--app=girder_worker.app", "worker", "--queues=local", "-c", "2", "--loglevel=INFO"]
     deploy:
       replicas: 1
       labels:
-        - "traefik.enable=true"
+        - "traefik.enable=false"
 
   girder:
-    image: xarthisius/girder:5-dev
+    image: docker.io/xarthisius/girder-sivacor:latest
     networks:
-      - traefik-net
+      - proxy
       - celery
       - mongo
     volumes:
       - ./volumes/base:/srv/data/base
-      - /home/xarth/codes/sivacor/girder-sivacor:/girder-plugins/01-girder-sivacor
-      - /var/run/docker.sock:/var/run/docker.sock
       - /tmp:/tmp
     environment:
       - DOMAIN=${domain}
@@ -116,30 +124,25 @@ services:
       - GIRDER_WORKER_BROKER=redis://redis/
       - GIRDER_WORKER_BACKEND=redis://redis/
       - GIRDER_NOTIFICATION_REDIS_URL=redis://redis:6379/
-      - GOSU_USER=1001:1001:${docker_group}
+      - GOSU_USER=1000:1000:${docker_group}
       - GOSU_CHOWN=/srv/data
       - GIRDER_LOCAL_FONTELLO_ARCHIVE=/girder/clients/web/static/built/fontello.zip
       - HOSTDIR=/
       - WATCHFILES_FORCE_POLLING=true
-    working_dir: /girder-plugins   # for reload
+      - GIRDER_SIVACOR_TRO_GPG_PASSPHRASE=${GIRDER_SIVACOR_TRO_GPG_PASSPHRASE}
+      - GIRDER_SIVACOR_TRO_GPG_FINGERPRINT=${GIRDER_SIVACOR_TRO_GPG_FINGERPRINT}
     extra_hosts:
       - "girder.${domain}:host-gateway" # for the local queue
-        # entrypoint: ["/bin/sleep", "infinity"]
     deploy:
       replicas: 1
       labels:
         - "traefik.enable=true"
         - "traefik.http.routers.girder.rule=Host(`girder.${domain}`)"
-        - "traefik.http.routers.girder.entrypoints=websecure"
+        - "traefik.http.routers.girder.entrypoints=https"
         - "traefik.http.routers.girder.tls=true"
-        - "traefik.http.routers.girder.tls.certresolver=default"
-        - "traefik.http.routers.girder.tls.domains[0].main=${domain}"
-        - "traefik.http.routers.girder.tls.domains[0].sans=*.${domain}"
         - "traefik.http.services.girder.loadbalancer.server.port=8080"
         - "traefik.http.services.girder.loadbalancer.passhostheader=true"
-        - "traefik.docker.network=wt_traefik-net"
-        - "traefik.http.middlewares.girder.forwardauth.address=http://girder:8080/api/v1/user/authorize/"
-        - "traefik.http.middlewares.girder.forwardauth.trustforwardheader=true"
+        - "traefik.swarm.network=wt_proxy"
 
   redis:
     image: redis:7-bullseye
@@ -151,13 +154,13 @@ services:
         - "traefik.enable=false"
 
 networks:
-  traefik-net:
-    driver: overlay
   mongo:
     driver: overlay
   celery:
     driver: overlay
     attachable: true
+  proxy:
+    driver: overlay
 
 volumes:
   mongo-data: {}

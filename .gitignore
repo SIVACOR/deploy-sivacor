@@ -2,7 +2,8 @@ volumes/
 src/*
 registry/docker
 traefik/access.log
-traefik/acme
+traefik/acme.json
 traefik/certs/*.pem
 homes/*
 ps/*
+.env*
