@@ -86,6 +86,7 @@ services:
     volumes:
       - ./volumes:/srv/data
       - /home/ubuntu/.gnupg:/home/girder/.gnupg
+      - /var/run/docker.sock:/var/run/docker.sock
       - /tmp:/tmp
     environment:
       - DOMAIN=${domain}
@@ -95,10 +96,19 @@ services:
       - GIRDER_WORKER_BACKEND=redis://redis/
       - GIRDER_NOTIFICATION_REDIS_URL=redis://redis:6379/
       - GIRDER_LOCAL_FONTELLO_ARCHIVE=/girder/clients/web/static/built/fontello.zip
+      - GIRDER_SETTING_CORE_CONTACT_EMAIL_ADDRESS=admin@sivacor.org
+      - GIRDER_SETTING_CORE_EMAIL_FROM_ADDRESS=SIVACOR Admin <admin@sivacor.org>
+      - GIRDER_SETTING_CORE_EMAIL_HOST=https://girder.${domain}
+      - GIRDER_SETTING_CORE_SMTP_ENCRYPTION=ssl
+      - GIRDER_SETTING_CORE_SMTP_HOST=mail.spacemail.com
+      - GIRDER_SETTING_CORE_SMTP_PASSWORD=${GIRDER_SMTP_PASSWORD}
+      - GIRDER_SETTING_CORE_SMTP_PORT=465
+      - GIRDER_SETTING_CORE_SMTP_USERNAME=${GIRDER_SMTP_USERNAME}
       - GOSU_USER=1000:1000:${docker_group}
       - HOSTDIR=/
       - GIRDER_SIVACOR_TRO_GPG_PASSPHRASE=${GIRDER_SIVACOR_TRO_GPG_PASSPHRASE}
       - GIRDER_SIVACOR_TRO_GPG_FINGERPRINT=${GIRDER_SIVACOR_TRO_GPG_FINGERPRINT}
+      - STATA_LICENSE_HOSTPATH=/home/ubuntu/deploy-dev/volumes/licenses/stata.lic.19
     extra_hosts:
       - "girder.${domain}:host-gateway" # for the local queue
     entrypoint: ["/usr/bin/tini", "--", "celery", "--app=girder_worker.app", "worker", "--queues=local", "-c", "2", "--loglevel=INFO"]
@@ -131,6 +141,14 @@ services:
       - WATCHFILES_FORCE_POLLING=true
       - GIRDER_SIVACOR_TRO_GPG_PASSPHRASE=${GIRDER_SIVACOR_TRO_GPG_PASSPHRASE}
       - GIRDER_SIVACOR_TRO_GPG_FINGERPRINT=${GIRDER_SIVACOR_TRO_GPG_FINGERPRINT}
+      - GIRDER_SETTING_CORE_CONTACT_EMAIL_ADDRESS=admin@sivacor.org
+      - GIRDER_SETTING_CORE_EMAIL_FROM_ADDRESS=SIVACOR Admin <admin@sivacor.org>
+      - GIRDER_SETTING_CORE_EMAIL_HOST=https://girder.${domain}
+      - GIRDER_SETTING_CORE_SMTP_ENCRYPTION=ssl
+      - GIRDER_SETTING_CORE_SMTP_HOST=mail.spacemail.com
+      - GIRDER_SETTING_CORE_SMTP_PASSWORD=${GIRDER_SMTP_PASSWORD}
+      - GIRDER_SETTING_CORE_SMTP_PORT=465
+      - GIRDER_SETTING_CORE_SMTP_USERNAME=${GIRDER_SMTP_USERNAME}
     extra_hosts:
       - "girder.${domain}:host-gateway" # for the local queue
     deploy:
