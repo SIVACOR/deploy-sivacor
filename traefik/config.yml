@@ -13,13 +13,7 @@ entryPoints:
     address: ":443"
 serversTransport:
   insecureSkipVerify: true
-providers:
-  swarm:
-    network: wt_proxy
-    endpoint: "unix:///var/run/docker.sock"
-    exposedByDefault: false
-  # file:
-  #   filename: /config.yml
+
 certificatesResolvers:
   cloudflare:
     acme:
@@ -34,3 +28,11 @@ certificatesResolvers:
         resolvers:
           - "1.1.1.1:53"
           - "1.0.0.1:53"
+
+providers:
+  swarm:
+    network: wt_proxy
+    endpoint: "unix:///var/run/docker.sock"
+    exposedByDefault: false
+  file:
+    filename: /etc/traefik/extra.yml

@@ -10,14 +10,13 @@ services:
         published: 443
         protocol: tcp
         mode: host
-      - "8888:8888"
     networks:
       - proxy
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - /etc/localtime:/etc/localtime:ro
       - ./traefik/acme.json:/acme.json:rw
-      - ./traefik/config.yml:/config.yml:ro
+      - ./traefik:/etc/traefik:ro
     deploy:
       replicas: 1
       labels:
@@ -36,7 +35,6 @@ services:
         - traefik.http.routers.traefik-secure.tls.domains[0].main=sivacor.org
         - traefik.http.routers.traefik-secure.tls.domains[0].sans=*.sivacor.org
         - traefik.http.routers.traefik-secure.service=api@internal
-        - traefik.http.services.traefik.loadbalancer.server.port=888
       placement:
         constraints:
           - "node.role == manager"
@@ -46,7 +44,7 @@ services:
       - "--accesslog=true"
       - "--accesslog.format=json"
       - "--accesslog.filepath=/dev/stdout"
-      - "--configFile=/config.yml"
+      - "--configFile=/etc/traefik/config.yml"
 
   mongo:
     image: mongo:4.4
@@ -104,7 +102,7 @@ services:
       - GIRDER_SETTING_CORE_SMTP_PASSWORD=${GIRDER_SMTP_PASSWORD}
       - GIRDER_SETTING_CORE_SMTP_PORT=465
       - GIRDER_SETTING_CORE_SMTP_USERNAME=${GIRDER_SMTP_USERNAME}
-      - GIRDER_SETTING_USER_QUOTA_DEFAULT_USER_QUOTA=5000000000
+      - GIRDER_SETTING_USER_QUOTA_DEFAULT_USER_QUOTA=10000000000
       - GOSU_USER=1000:1000:${docker_group}
       - HOSTDIR=/
       - GIRDER_SIVACOR_TRO_GPG_PASSPHRASE=${GIRDER_SIVACOR_TRO_GPG_PASSPHRASE}
@@ -151,7 +149,7 @@ services:
       - GIRDER_SETTING_CORE_SMTP_PASSWORD=${GIRDER_SMTP_PASSWORD}
       - GIRDER_SETTING_CORE_SMTP_PORT=465
       - GIRDER_SETTING_CORE_SMTP_USERNAME=${GIRDER_SMTP_USERNAME}
-      - GIRDER_SETTING_USER_QUOTA_DEFAULT_USER_QUOTA=5000000000
+      - GIRDER_SETTING_USER_QUOTA_DEFAULT_USER_QUOTA=10000000000
       - DOCKER_HOST_TMP_ROOT=/home/ubuntu/deploy-dev/volumes
     extra_hosts:
       - "girder.${domain}:host-gateway" # for the local queue
@@ -170,6 +168,8 @@ services:
     image: redis:7-bullseye
     networks:
       - celery
+    volumes:
+      - /home/ubuntu/redis_data:/data
     deploy:
       replicas: 1
       labels:
