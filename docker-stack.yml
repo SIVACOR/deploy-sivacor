@@ -76,6 +76,40 @@ services:
     extra_hosts:
       - "girder.${domain}:host-gateway" # for the local queue
 
+  beat:
+    image: docker.io/xarthisius/girder-sivacor:latest
+    networks:
+      - celery
+      - mongo
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+    environment:
+      - DOMAIN=${domain}
+      - GIRDER_MONGO_URI=mongodb://mongo:27017/girder
+      - GIRDER_HOST=0.0.0.0
+      - GIRDER_WORKER_BROKER=redis://redis/
+      - GIRDER_WORKER_BACKEND=redis://redis/
+      - GIRDER_NOTIFICATION_REDIS_URL=redis://redis:6379/
+      - GIRDER_SETTING_CORE_CONTACT_EMAIL_ADDRESS=admin@sivacor.org
+      - GIRDER_SETTING_CORE_EMAIL_FROM_ADDRESS=SIVACOR Admin <admin@sivacor.org>
+      - GIRDER_SETTING_CORE_EMAIL_HOST=https://girder.${domain}
+      - GIRDER_SETTING_CORE_SMTP_ENCRYPTION=ssl
+      - GIRDER_SETTING_CORE_SMTP_HOST=mail.spacemail.com
+      - GIRDER_SETTING_CORE_SMTP_PASSWORD=${GIRDER_SMTP_PASSWORD}
+      - GIRDER_SETTING_CORE_SMTP_PORT=465
+      - GIRDER_SETTING_CORE_SMTP_USERNAME=${GIRDER_SMTP_USERNAME}
+      - GIRDER_SETTING_USER_QUOTA_DEFAULT_USER_QUOTA=10000000000
+      - HOSTDIR=/
+      - GIRDER_SIVACOR_TRO_GPG_PASSPHRASE=${GIRDER_SIVACOR_TRO_GPG_PASSPHRASE}
+      - GIRDER_SIVACOR_TRO_GPG_FINGERPRINT=${GIRDER_SIVACOR_TRO_GPG_FINGERPRINT}
+    extra_hosts:
+      - "girder.${domain}:host-gateway" # for the local queue
+    entrypoint: ["/usr/bin/tini", "--", "celery", "--app=girder_worker.app", "beat", "--schedule=/home/girder/celerybeat-schedule", "--loglevel=INFO"]
+    deploy:
+      replicas: 1
+      labels:
+        - "traefik.enable=false"
+
   local_worker:
     image: docker.io/xarthisius/girder-sivacor:latest
     networks:
@@ -111,7 +145,7 @@ services:
       - DOCKER_HOST_TMP_ROOT=/home/ubuntu/deploy-dev/volumes
     extra_hosts:
       - "girder.${domain}:host-gateway" # for the local queue
-    entrypoint: ["/usr/bin/tini", "--", "celery", "--app=girder_worker.app", "worker", "--queues=local", "-c", "2", "--loglevel=INFO"]
+    entrypoint: ["/usr/bin/tini", "--", "celery", "--app=girder_worker.app", "worker", "--queues=local,celery", "-c", "2", "--loglevel=INFO"]
     deploy:
       replicas: 1
       labels:
