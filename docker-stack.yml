@@ -20,7 +20,7 @@ services:
     deploy:
       replicas: 1
       labels:
-        - traefik.enable=true
+        - traefik.enable=false
         - traefik.http.routers.traefik.entrypoints=http
         - traefik.http.routers.traefik.rule=Host(`traefik.sivacor.org`)
         - traefik.http.middlewares.traefik-auth.basicauth.users=admin:$$2y$$05$$yPv8h3.V9P2MQqN08JHhcuTvcJmmyz4O84oRuBqoHerczO2tQJ8sG
@@ -93,6 +93,7 @@ services:
       - GIRDER_SETTING_CORE_CONTACT_EMAIL_ADDRESS=admin@sivacor.org
       - GIRDER_SETTING_CORE_EMAIL_FROM_ADDRESS=SIVACOR Admin <admin@sivacor.org>
       - GIRDER_SETTING_CORE_EMAIL_HOST=https://girder.${domain}
+      - GIRDER_SETTING_CORE_REGISTRATION_POLICY=approve
       - GIRDER_SETTING_CORE_SMTP_ENCRYPTION=ssl
       - GIRDER_SETTING_CORE_SMTP_HOST=mail.spacemail.com
       - GIRDER_SETTING_CORE_SMTP_PASSWORD=${GIRDER_SMTP_PASSWORD}
@@ -208,6 +209,21 @@ services:
       replicas: 1
       labels:
         - "traefik.enable=false"
+
+  vocabulary:
+    image: docker.io/xarthisius/sivacor-vocabulary:latest
+    networks:
+      - proxy
+    deploy:
+      replicas: 1
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.vocabulary.rule=Host(`vocabulary.${domain}`)"
+        - "traefik.http.routers.vocabulary.entrypoints=https"
+        - "traefik.http.routers.vocabulary.tls=true"
+        - "traefik.http.services.vocabulary.loadbalancer.server.port=8080"
+        - "traefik.http.services.vocabulary.loadbalancer.passhostheader=true"
+        - "traefik.swarm.network=wt_proxy"
 
 networks:
   mongo:
