@@ -57,6 +57,10 @@ services:
       replicas: 1
       labels:
         - "traefik.enable=false"
+      # Local named volumes: rescheduled onto another node this comes up empty.
+      placement:
+        constraints:
+          - "node.role == manager"
 
   submit:
     networks:
@@ -103,6 +107,7 @@ services:
       - HOSTDIR=/
       - GIRDER_SIVACOR_TRO_GPG_PASSPHRASE=${GIRDER_SIVACOR_TRO_GPG_PASSPHRASE}
       - GIRDER_SIVACOR_TRO_GPG_FINGERPRINT=${GIRDER_SIVACOR_TRO_GPG_FINGERPRINT}
+      - MASTER_KEY_HEX=${MASTER_KEY_HEX}
     extra_hosts:
       - "girder.${domain}:host-gateway" # for the local queue
     entrypoint: ["/usr/bin/tini", "--", "celery", "--app=girder_worker.app", "beat", "--schedule=/home/girder/celerybeat-schedule", "--loglevel=INFO"]
@@ -110,6 +115,11 @@ services:
       replicas: 1
       labels:
         - "traefik.enable=false"
+      # celerybeat-schedule is a local file: on another node beat would forget
+      # when it last ran and re-fire every periodic task on startup.
+      placement:
+        constraints:
+          - "node.role == manager"
 
   local_worker:
     image: docker.io/xarthisius/girder-sivacor:latest
@@ -144,13 +154,40 @@ services:
       - GIRDER_SIVACOR_TRO_GPG_FINGERPRINT=${GIRDER_SIVACOR_TRO_GPG_FINGERPRINT}
       - STATA_LICENSE_HOSTPATH=/home/ubuntu/deploy-dev/volumes/licenses/stata.lic.19
       - DOCKER_HOST_TMP_ROOT=/home/ubuntu/deploy-dev/volumes
+      - MASTER_KEY_HEX=${MASTER_KEY_HEX}
+      # A stable, explicit private-queue name. Left unset, routing.py derives it
+      # from the celery node name, which under Swarm is a task ID that changes
+      # on every restart -- orphaning any chain already pinned to the old name.
+      - SIVACOR_WORKER_QUEUE=sivacor.static-01
+      # Periodic sweeps (retention, reaper) arrive with no submission and thus
+      # no token to inherit, so they need a standing credential. Only this
+      # worker consumes sivacor.maintenance, so only it needs them.
+      - GIRDER_API_URL=https://girder.${domain}/api/v1
+      - GIRDER_API_KEY=${GIRDER_API_KEY}
     extra_hosts:
       - "girder.${domain}:host-gateway" # for the local queue
-    entrypoint: ["/usr/bin/tini", "--", "celery", "--app=girder_worker.app", "worker", "--queues=local,celery", "-c", "2", "--loglevel=INFO"]
+    # local:                 Girder core's own queue (deleteFolderTask,
+    #                        importDataTask, ...). Core raises 503 if nothing
+    #                        consumes it, so it must stay.
+    # sivacor:               shared dispatch queue new submissions land on.
+    # sivacor.static-01:     this worker's private queue; a submission's chain
+    #                        is pinned here after its first step.
+    # sivacor.maintenance:   periodic housekeeping, kept off the dispatch queue
+    #                        so queue depth stays a count of waiting submissions.
+    entrypoint: ["/usr/bin/tini", "--", "celery", "--app=girder_worker.app", "worker", "--queues=local,sivacor,sivacor.static-01,sivacor.maintenance", "-c", "2", "--loglevel=INFO"]
     deploy:
+      # Must stay at 1: two replicas would share one private queue name, and a
+      # pinned step could land on the replica that lacks the workspace
+      # directory. Scale inside the VM with -c, not with replicas.
       replicas: 1
       labels:
         - "traefik.enable=false"
+      # Node-bound three times over: the GPG keyring and Stata license are
+      # bind-mounted from this host, DOCKER_HOST_TMP_ROOT names paths on it, and
+      # a chain pinned to sivacor.static-01 expects to find its workspace here.
+      placement:
+        constraints:
+          - "node.role == manager"
 
   girder:
     image: docker.io/xarthisius/girder-sivacor:latest
@@ -186,10 +223,19 @@ services:
       - GIRDER_SETTING_CORE_SMTP_USERNAME=${GIRDER_SMTP_USERNAME}
       - GIRDER_SETTING_USER_QUOTA_DEFAULT_USER_QUOTA=10000000000
       - DOCKER_HOST_TMP_ROOT=/home/ubuntu/deploy-dev/volumes
+      # Must match the workers': the server encrypts job secrets, the worker
+      # decrypts them. Both sides currently fall back to the same hardcoded
+      # dummy key, so they agree only by accident.
+      - MASTER_KEY_HEX=${MASTER_KEY_HEX}
     extra_hosts:
       - "girder.${domain}:host-gateway" # for the local queue
     deploy:
       replicas: 1
+      # ./volumes/base is the filesystem assetstore, bind-mounted from this
+      # node. Rescheduled elsewhere, every stored file disappears.
+      placement:
+        constraints:
+          - "node.role == manager"
       labels:
         - "traefik.enable=true"
         - "traefik.http.routers.girder.rule=Host(`girder.${domain}`)"
@@ -209,6 +255,11 @@ services:
       replicas: 1
       labels:
         - "traefik.enable=false"
+      # Bind mount from this node, and it is the celery broker: moving it
+      # loses queued submissions and the pending-log pubsub.
+      placement:
+        constraints:
+          - "node.role == manager"
 
   vocabulary:
     image: docker.io/xarthisius/sivacor-vocabulary:latest

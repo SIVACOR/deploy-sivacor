@@ -72,6 +72,11 @@ settings = [
         ),
     },
     {"key": "core.cookie_domain", "value": f".{domain}"},
+    # Without this, getWorkerApiUrl() falls back to getApiUrl(), which is
+    # derived from the incoming request -- so a worker's callback URL would
+    # depend on whichever proxy headers happened to be on the submit request.
+    # Off-box workers need a stable public URL.
+    {"key": "worker.api_url", "value": f"https://girder.{domain}/api/v1"},
     {"key": "oauth.globus_client_id", "value": os.environ.get("GLOBUS_CLIENT_ID")},
     {
         "key": "oauth.globus_client_secret",
