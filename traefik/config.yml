@@ -34,5 +34,9 @@ providers:
     network: wt_proxy
     endpoint: "unix:///var/run/docker.sock"
     exposedByDefault: false
-  file:
-    filename: /etc/traefik/extra.yml
+  # The `file` provider (extra.yml) is gone. It held the apex -> docs and
+  # feedback -> Qualtrics redirect routers, which are now traefik labels on the
+  # `vocabulary` service in docker-stack.yml. A bind-mounted file is never
+  # interpolated by `docker stack config`, so those rules could not follow
+  # ${domain} and hardcoded sivacor.org -- meaning any non-production host
+  # served production host rules and requested ACME certs for them.

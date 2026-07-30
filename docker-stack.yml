@@ -22,18 +22,23 @@ services:
       labels:
         - traefik.enable=false
         - traefik.http.routers.traefik.entrypoints=http
-        - traefik.http.routers.traefik.rule=Host(`traefik.sivacor.org`)
+        - traefik.http.routers.traefik.rule=Host(`traefik.${domain}`)
         - traefik.http.middlewares.traefik-auth.basicauth.users=admin:$$2y$$05$$yPv8h3.V9P2MQqN08JHhcuTvcJmmyz4O84oRuBqoHerczO2tQJ8sG
         - traefik.http.middlewares.traefik-https-redirect.redirectscheme.scheme=https
         - traefik.http.middlewares.sslheader.headers.customrequestheaders.X-Forwarded-Proto=https
         - traefik.http.routers.traefik.middlewares=traefik-https-redirect
         - traefik.http.routers.traefik-secure.entrypoints=https
-        - traefik.http.routers.traefik-secure.rule=Host(`traefik.sivacor.org`)
+        - traefik.http.routers.traefik-secure.rule=Host(`traefik.${domain}`)
         - traefik.http.routers.traefik-secure.middlewares=traefik-auth
         - traefik.http.routers.traefik-secure.tls=true
         - traefik.http.routers.traefik-secure.tls.certresolver=cloudflare
-        - traefik.http.routers.traefik-secure.tls.domains[0].main=sivacor.org
-        - traefik.http.routers.traefik-secure.tls.domains[0].sans=*.sivacor.org
+        # This is the ONLY router that requests a certificate. Every other
+        # router carries a bare `tls=true` and is served from the resulting
+        # store by SNI, so these two lines decide TLS for the whole stack.
+        # A wildcard covers exactly one label: with domain=test.sivacor.org,
+        # *.sivacor.org would NOT match submit.test.sivacor.org.
+        - traefik.http.routers.traefik-secure.tls.domains[0].main=${domain}
+        - traefik.http.routers.traefik-secure.tls.domains[0].sans=*.${domain}
         - traefik.http.routers.traefik-secure.service=api@internal
       placement:
         constraints:
@@ -81,7 +86,7 @@ services:
       - "girder.${domain}:host-gateway" # for the local queue
 
   beat:
-    image: docker.io/xarthisius/girder-sivacor:latest
+    image: ${GIRDER_SIVACOR_IMAGE:-docker.io/xarthisius/girder-sivacor:latest}
     networks:
       - celery
       - mongo
@@ -91,11 +96,15 @@ services:
       - DOMAIN=${domain}
       - GIRDER_MONGO_URI=mongodb://mongo:27017/girder
       - GIRDER_HOST=0.0.0.0
-      - GIRDER_WORKER_BROKER=redis://redis/
-      - GIRDER_WORKER_BACKEND=redis://redis/
-      - GIRDER_NOTIFICATION_REDIS_URL=redis://redis:6379/
-      - GIRDER_SETTING_CORE_CONTACT_EMAIL_ADDRESS=admin@sivacor.org
-      - GIRDER_SETTING_CORE_EMAIL_FROM_ADDRESS=SIVACOR Admin <admin@sivacor.org>
+      - GIRDER_WORKER_BROKER=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/
+      - GIRDER_WORKER_BACKEND=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/
+      - GIRDER_NOTIFICATION_REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/
+      # Deliberately NOT derived from ${domain}: the envelope sender has to be
+      # a mailbox the spacemail account is authorized to send as, and
+      # admin@test.sivacor.org is not one. Override only if you have a real
+      # mailbox for it.
+      - GIRDER_SETTING_CORE_CONTACT_EMAIL_ADDRESS=${GIRDER_ADMIN_EMAIL:-admin@sivacor.org}
+      - GIRDER_SETTING_CORE_EMAIL_FROM_ADDRESS=SIVACOR Admin <${GIRDER_ADMIN_EMAIL:-admin@sivacor.org}>
       - GIRDER_SETTING_CORE_EMAIL_HOST=https://girder.${domain}
       - GIRDER_SETTING_CORE_REGISTRATION_POLICY=approve
       - GIRDER_SETTING_CORE_SMTP_ENCRYPTION=ssl
@@ -122,7 +131,7 @@ services:
           - "node.role == manager"
 
   local_worker:
-    image: docker.io/xarthisius/girder-sivacor:latest
+    image: ${GIRDER_SIVACOR_IMAGE:-docker.io/xarthisius/girder-sivacor:latest}
     networks:
       - celery
       - mongo
@@ -135,12 +144,16 @@ services:
       - DOMAIN=${domain}
       - GIRDER_MONGO_URI=mongodb://mongo:27017/girder
       - GIRDER_HOST=0.0.0.0
-      - GIRDER_WORKER_BROKER=redis://redis/
-      - GIRDER_WORKER_BACKEND=redis://redis/
-      - GIRDER_NOTIFICATION_REDIS_URL=redis://redis:6379/
+      - GIRDER_WORKER_BROKER=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/
+      - GIRDER_WORKER_BACKEND=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/
+      - GIRDER_NOTIFICATION_REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/
       - GIRDER_LOCAL_FONTELLO_ARCHIVE=/girder/clients/web/static/built/fontello.zip
-      - GIRDER_SETTING_CORE_CONTACT_EMAIL_ADDRESS=admin@sivacor.org
-      - GIRDER_SETTING_CORE_EMAIL_FROM_ADDRESS=SIVACOR Admin <admin@sivacor.org>
+      # Deliberately NOT derived from ${domain}: the envelope sender has to be
+      # a mailbox the spacemail account is authorized to send as, and
+      # admin@test.sivacor.org is not one. Override only if you have a real
+      # mailbox for it.
+      - GIRDER_SETTING_CORE_CONTACT_EMAIL_ADDRESS=${GIRDER_ADMIN_EMAIL:-admin@sivacor.org}
+      - GIRDER_SETTING_CORE_EMAIL_FROM_ADDRESS=SIVACOR Admin <${GIRDER_ADMIN_EMAIL:-admin@sivacor.org}>
       - GIRDER_SETTING_CORE_EMAIL_HOST=https://girder.${domain}
       - GIRDER_SETTING_CORE_SMTP_ENCRYPTION=ssl
       - GIRDER_SETTING_CORE_SMTP_HOST=mail.spacemail.com
@@ -152,29 +165,39 @@ services:
       - HOSTDIR=/
       - GIRDER_SIVACOR_TRO_GPG_PASSPHRASE=${GIRDER_SIVACOR_TRO_GPG_PASSPHRASE}
       - GIRDER_SIVACOR_TRO_GPG_FINGERPRINT=${GIRDER_SIVACOR_TRO_GPG_FINGERPRINT}
-      - STATA_LICENSE_HOSTPATH=/home/ubuntu/deploy-dev/volumes/licenses/stata.lic.19
-      - DOCKER_HOST_TMP_ROOT=/home/ubuntu/deploy-dev/volumes
+      # P0.8: the /home/ubuntu/deploy-dev default is a deploy-dev path inside
+      # the production stack and is still unverified on the prod host. Kept as
+      # the default so production behaviour is unchanged; override per host.
+      - STATA_LICENSE_HOSTPATH=${STATA_LICENSE_HOSTPATH:-/home/ubuntu/deploy-dev/volumes/licenses/stata.lic.19}
+      - DOCKER_HOST_TMP_ROOT=${DOCKER_HOST_TMP_ROOT:-/home/ubuntu/deploy-dev/volumes}
       - MASTER_KEY_HEX=${MASTER_KEY_HEX}
       # A stable, explicit private-queue name. Left unset, routing.py derives it
       # from the celery node name, which under Swarm is a task ID that changes
       # on every restart -- orphaning any chain already pinned to the old name.
       - SIVACOR_WORKER_QUEUE=sivacor.static-01
       # Periodic sweeps (retention, reaper) arrive with no submission and thus
-      # no token to inherit, so they need a standing credential. Only this
-      # worker consumes sivacor.maintenance, so only it needs them.
+      # no token to inherit. They mint their own admin token through the model
+      # layer -- this worker has GIRDER_MONGO_URI -- so only the URL is needed.
+      # The sweeps still go over HTTP: they have to execute in the Girder
+      # server process, where jobs.job.update.after is bound.
       - GIRDER_API_URL=https://girder.${domain}/api/v1
-      - GIRDER_API_KEY=${GIRDER_API_KEY}
     extra_hosts:
       - "girder.${domain}:host-gateway" # for the local queue
     # local:                 Girder core's own queue (deleteFolderTask,
     #                        importDataTask, ...). Core raises 503 if nothing
-    #                        consumes it, so it must stay.
+    #                        consumes it, so it must stay. Periodic
+    #                        housekeeping (retention sweep, reaper) rides it
+    #                        too -- all that matters is that it stays off the
+    #                        dispatch queue, whose depth an autoscaler reads as
+    #                        a count of submissions waiting for a worker. A
+    #                        dedicated sivacor.maintenance queue bought nothing:
+    #                        --concurrency is one pool shared across every queue
+    #                        a worker consumes, so a separate name gives the
+    #                        reaper no reserved slot.
     # sivacor:               shared dispatch queue new submissions land on.
     # sivacor.static-01:     this worker's private queue; a submission's chain
     #                        is pinned here after its first step.
-    # sivacor.maintenance:   periodic housekeeping, kept off the dispatch queue
-    #                        so queue depth stays a count of waiting submissions.
-    entrypoint: ["/usr/bin/tini", "--", "celery", "--app=girder_worker.app", "worker", "--queues=local,sivacor,sivacor.static-01,sivacor.maintenance", "-c", "2", "--loglevel=INFO"]
+    entrypoint: ["/usr/bin/tini", "--", "celery", "--app=girder_worker.app", "worker", "--queues=${SIVACOR_MANAGER_QUEUES:-local,sivacor,sivacor.static-01}", "-c", "4", "--loglevel=INFO"]
     deploy:
       # Must stay at 1: two replicas would share one private queue name, and a
       # pinned step could land on the replica that lacks the workspace
@@ -190,7 +213,7 @@ services:
           - "node.role == manager"
 
   girder:
-    image: docker.io/xarthisius/girder-sivacor:latest
+    image: ${GIRDER_SIVACOR_IMAGE:-docker.io/xarthisius/girder-sivacor:latest}
     networks:
       - proxy
       - celery
@@ -203,9 +226,9 @@ services:
       - DASHBOARD_URL=https://dashboard.${domain}
       - GIRDER_MONGO_URI=mongodb://mongo:27017/girder
       - GIRDER_HOST=0.0.0.0
-      - GIRDER_WORKER_BROKER=redis://redis/
-      - GIRDER_WORKER_BACKEND=redis://redis/
-      - GIRDER_NOTIFICATION_REDIS_URL=redis://redis:6379/
+      - GIRDER_WORKER_BROKER=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/
+      - GIRDER_WORKER_BACKEND=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/
+      - GIRDER_NOTIFICATION_REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/
       - GOSU_USER=1000:1000:${docker_group}
       - GOSU_CHOWN=/srv/data
       - GIRDER_LOCAL_FONTELLO_ARCHIVE=/girder/clients/web/static/built/fontello.zip
@@ -213,8 +236,12 @@ services:
       - WATCHFILES_FORCE_POLLING=true
       - GIRDER_SIVACOR_TRO_GPG_PASSPHRASE=${GIRDER_SIVACOR_TRO_GPG_PASSPHRASE}
       - GIRDER_SIVACOR_TRO_GPG_FINGERPRINT=${GIRDER_SIVACOR_TRO_GPG_FINGERPRINT}
-      - GIRDER_SETTING_CORE_CONTACT_EMAIL_ADDRESS=admin@sivacor.org
-      - GIRDER_SETTING_CORE_EMAIL_FROM_ADDRESS=SIVACOR Admin <admin@sivacor.org>
+      # Deliberately NOT derived from ${domain}: the envelope sender has to be
+      # a mailbox the spacemail account is authorized to send as, and
+      # admin@test.sivacor.org is not one. Override only if you have a real
+      # mailbox for it.
+      - GIRDER_SETTING_CORE_CONTACT_EMAIL_ADDRESS=${GIRDER_ADMIN_EMAIL:-admin@sivacor.org}
+      - GIRDER_SETTING_CORE_EMAIL_FROM_ADDRESS=SIVACOR Admin <${GIRDER_ADMIN_EMAIL:-admin@sivacor.org}>
       - GIRDER_SETTING_CORE_EMAIL_HOST=https://girder.${domain}
       - GIRDER_SETTING_CORE_SMTP_ENCRYPTION=ssl
       - GIRDER_SETTING_CORE_SMTP_HOST=mail.spacemail.com
@@ -222,7 +249,7 @@ services:
       - GIRDER_SETTING_CORE_SMTP_PORT=465
       - GIRDER_SETTING_CORE_SMTP_USERNAME=${GIRDER_SMTP_USERNAME}
       - GIRDER_SETTING_USER_QUOTA_DEFAULT_USER_QUOTA=10000000000
-      - DOCKER_HOST_TMP_ROOT=/home/ubuntu/deploy-dev/volumes
+      - DOCKER_HOST_TMP_ROOT=${DOCKER_HOST_TMP_ROOT:-/home/ubuntu/deploy-dev/volumes}
       # Must match the workers': the server encrypts job secrets, the worker
       # decrypts them. Both sides currently fall back to the same hardcoded
       # dummy key, so they agree only by accident.
@@ -251,6 +278,25 @@ services:
       - celery
     volumes:
       - /home/ubuntu/redis_data:/data
+    # Off-box workers reach the broker here, so it is no longer purely internal.
+    # The celery message carries an admin-scoped Girder token in plaintext,
+    # which makes broker confidentiality a security boundary, not a nicety.
+    # `:?` is deliberate: an unset password would otherwise render as
+    # `--requirepass ""`, which disables auth entirely -- on a *published* port.
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD must be set}"]
+    ports:
+      # mode: host bypasses the routing mesh, so this binds on the node itself.
+      #
+      # WARNING: Swarm cannot restrict a published port to one interface --
+      # `host_ip` is rejected by `docker stack config`, so this listens on ALL
+      # of the node's addresses, the floating IP included. The tenant-only
+      # restriction MUST come from the JS2 security group: allow 6379 from the
+      # project CIDR and nothing else. `requirepass` is the second layer, not
+      # the first. Verify from outside the project that 6379 is unreachable.
+      - target: 6379
+        published: 6379
+        protocol: tcp
+        mode: host
     deploy:
       replicas: 1
       labels:
@@ -275,6 +321,35 @@ services:
         - "traefik.http.services.vocabulary.loadbalancer.server.port=8080"
         - "traefik.http.services.vocabulary.loadbalancer.passhostheader=true"
         - "traefik.swarm.network=wt_proxy"
+        # Two redirect-only routers, moved here from traefik/config.yml so they
+        # follow ${domain} -- that file is a bind-mounted file provider, which
+        # `docker stack config` never interpolates, so it hardcoded sivacor.org
+        # and issued ACME requests for production names from any other host.
+        #
+        # They live on `vocabulary` only because a router needs *some* service
+        # to attach to; the redirectregex middleware matches ^(.*) and answers
+        # 302 before the backend is ever consulted, which is why the old
+        # config.yml could get away with a service that had zero servers.
+        #
+        # No certresolver here: the traefik-secure router already requests
+        # main=${domain} + sans=*.${domain}, which covers both the apex and
+        # feedback.${domain}, and a bare tls=true is served from that store.
+        - "traefik.http.routers.mainpage.rule=Host(`${domain}`)"
+        - "traefik.http.routers.mainpage.entrypoints=https"
+        - "traefik.http.routers.mainpage.tls=true"
+        - "traefik.http.routers.mainpage.service=vocabulary"
+        - "traefik.http.routers.mainpage.middlewares=mainpage-redirect"
+        - "traefik.http.middlewares.mainpage-redirect.redirectregex.regex=^(.*)"
+        - "traefik.http.middlewares.mainpage-redirect.redirectregex.replacement=${DOCS_URL:-https://docs.sivacor.org/}"
+        - "traefik.http.middlewares.mainpage-redirect.redirectregex.permanent=false"
+        - "traefik.http.routers.feedback.rule=Host(`feedback.${domain}`)"
+        - "traefik.http.routers.feedback.entrypoints=https"
+        - "traefik.http.routers.feedback.tls=true"
+        - "traefik.http.routers.feedback.service=vocabulary"
+        - "traefik.http.routers.feedback.middlewares=feedback-redirect"
+        - "traefik.http.middlewares.feedback-redirect.redirectregex.regex=^(.*)"
+        - "traefik.http.middlewares.feedback-redirect.redirectregex.replacement=${FEEDBACK_URL:-https://cornell.ca1.qualtrics.com/jfe/form/SV_bEnajmkM2qKBr0O}"
+        - "traefik.http.middlewares.feedback-redirect.redirectregex.permanent=false"
 
 networks:
   mongo:
