@@ -23,7 +23,7 @@ has to contain.
 | Variable | Purpose |
 |---|---|
 | `domain` | Public domain, e.g. `sivacor.org`. Used for every Traefik host rule and for `worker.api_url`. |
-| `docker_group` | Host GID of the `docker` group, for `GOSU_USER`. **Differs per host** — `getent group docker \| cut -d: -f3`. |
+| `docker_group` | Host GID of the `docker` group (`getent group docker \| cut -d: -f3`). Feeds `GOSU_USER`, which **nothing reads** — see *Docker socket access* below. Must be `112` for the socket to work, because the image hardcodes that GID. |
 | `CF_DNS_API_TOKEN` | Cloudflare token for Traefik's ACME DNS-01 challenge. |
 | `GIRDER_SMTP_USERNAME` / `GIRDER_SMTP_PASSWORD` | Outgoing mail on `mail.spacemail.com`. |
 | `GLOBUS_CLIENT_ID` / `GLOBUS_CLIENT_SECRET` | Globus OAuth. |
@@ -92,6 +92,53 @@ consulted, which is how the old file-provider version worked with a service that
 had zero servers. They also no longer carry their own `certResolver` — the
 wildcard covers both the apex (as `main`) and `feedback.$domain` (as `*.`), so
 this is two fewer certificates to issue.
+
+## Docker socket access — `GOSU_USER` is inert, GID 112 is hardcoded
+
+`girder` and `local_worker` both set `GOSU_USER=1000:1000:${docker_group}`.
+**Nothing reads that variable.** Verified 2026-07-30:
+
+| Checked | Result |
+|---|---|
+| `girder-sivacor` base image | `FROM python:3.12-slim` — no WholeTale base, nothing inherited |
+| entrypoint scripts in the image | none; `ENTRYPOINT` is the gunicorn line directly |
+| `gosu` binary in the image | absent |
+| `GOSU_USER` in `girder_sivacor/**` (py, sh) | zero hits |
+| `GOSU_USER` in the girder source (excluding `venv/`) | zero hits |
+
+What actually grants socket access is baked into the image at build time —
+`girder-sivacor/Dockerfile:98`:
+
+```dockerfile
+RUN groupadd -g 1000 girder && groupadd -g 112 docker \
+ && useradd -g 1000 -G 112 -u 1000 -m -s /bin/bash girder
+```
+
+So the container's `girder` user is in **GID 112**, and the docker socket is
+readable if and only if the *host's* docker GID is also 112. JS2 hosts are 112,
+which is why this works in production and on the test stack.
+
+**Why this matters.** `docker_group` looks like the per-host knob and is not. On a
+host with a different docker GID, setting it correctly changes nothing: the
+container still cannot open the socket, no analysis container can start, and the
+only symptom is a `PermissionError(13)` from docker-py buried in a worker
+traceback. Check the host before assuming:
+
+```sh
+getent group docker | cut -d: -f3        # must be 112
+```
+
+**The worker VM does not have this problem.** `deploy-sivacor/worker-cloud-init.sh`
+passes `--group-add <discovered GID>` on `docker run`, which adds the host's real
+GID as a supplementary group regardless of what the image baked in.
+
+**The Swarm services cannot use that fix.** `docker stack config` rejects
+compose's `group_add` (`Additional property group_add is not allowed`), so there
+is no stack-file equivalent. The durable fix is to make the GID a build arg in
+`girder-sivacor/Dockerfile` instead of a literal, at which point `docker_group`
+could become meaningful. Until then, treat "host docker GID == 112" as a
+deployment precondition, and `GOSU_USER` / `docker_group` as vestigial
+(WholeTale-era) config kept only because removing it is a separate change.
 
 ## Pointing the UI at the right API
 
