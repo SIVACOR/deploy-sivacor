@@ -42,6 +42,7 @@ existing `.env` needs none of them.
 | `GIRDER_API_KEY` | unset | See below — **not required** for the co-located worker. |
 | `GIRDER_ADMIN_EMAIL` | `admin@sivacor.org` | Contact + envelope-sender address. Deliberately **not** derived from `domain`: it has to be a mailbox the `mail.spacemail.com` account is authorized to send as, so on a test domain the default is usually still what you want. |
 | `GIRDER_SIVACOR_IMAGE` | `docker.io/xarthisius/girder-sivacor:latest` | Backend image for `girder`, `beat` and `local_worker`. Point at a branch tag to test one. |
+| `AEA_SIVACOR_IMAGE` | `xarthisius/aea-sivacor:latest` | Frontend image for `submit`. |
 | `SIVACOR_MANAGER_QUEUES` | `local,sivacor,sivacor.static-01` | `local_worker`'s `--queues`. Drop `sivacor` to stop the manager accepting submissions once a remote worker exists. |
 | `DOCKER_HOST_TMP_ROOT` | `/home/ubuntu/deploy-dev/volumes` | Host path `lib.py` builds sibling-container bind-mount sources from. The default is the P0.8 open question — a `deploy-dev` path inside the production stack. Set it per host. |
 | `STATA_LICENSE_HOSTPATH` | `…/deploy-dev/volumes/licenses/stata.lic.19` | Same caveat. |
@@ -91,6 +92,40 @@ consulted, which is how the old file-provider version worked with a service that
 had zero servers. They also no longer carry their own `certResolver` — the
 wildcard covers both the apex (as `main`) and `feedback.$domain` (as `*.`), so
 this is two fewer certificates to issue.
+
+## Pointing the UI at the right API
+
+`submit` gets `PUBLIC_SIVACOR_API_URL=https://girder.${domain}/api/v1` from the
+stack file, so it follows `domain` like everything else. Three things make this
+worth knowing:
+
+- **It is a runtime variable, not a build-time one.** The UI reads it through
+  `$env/dynamic/public` and runs under `adapter-node` (`CMD ["node", "build"]`),
+  so retargeting a deployment never needs an image rebuild.
+- **A wrong name fails silently and dangerously.** `src/lib/api.ts:54` is
+  `env.PUBLIC_SIVACOR_API_URL || 'https://girder.sivacor.org/api/v1'` — so a typo
+  points the test UI straight at **production**, with no error. Several `.env*`
+  files in `aea-sivacor` define a bare `SIVACOR_API_URL`, which is **not read**:
+  `$env/dynamic/public` uses SvelteKit's `publicPrefix` (`PUBLIC_`), which is
+  unrelated to the `envPrefix: 'SIVACOR_'` in `svelte.config.js`.
+- **Verify what the browser actually got**, rather than trusting the container
+  env — SvelteKit serves the public env as a real endpoint:
+
+  ```sh
+  curl -s https://submit.$domain/_app/env.js
+  # export const env={"PUBLIC_SIVACOR_API_URL":"https://girder.test.sivacor.org/api/v1"}
+  ```
+
+Keep the `/api/v1` suffix: `api.ts:190` does `BASE_URL.replace('/api/v1', '')` to
+build folder links.
+
+> **Unrelated trap in the same service.** `svelte.config.js` sets adapter-node's
+> `envPrefix: 'SIVACOR_'`, so the adapter reads `SIVACOR_PORT` / `SIVACOR_HOST` —
+> **not** `PORT` / `HOST`. The `ENV PORT=3000` and `ENV HOST=0.0.0.0` lines in
+> `aea-sivacor/Dockerfile` are therefore dead, and only work by coincidence
+> because they match adapter-node's own defaults. Verified: `PORT=4000` is
+> ignored and the app stays on 3000. If you ever need to move the port, set
+> `SIVACOR_PORT` and update the Traefik `loadbalancer.server.port` label to match.
 
 ## `MASTER_KEY_HEX`
 

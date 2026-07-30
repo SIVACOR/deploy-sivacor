@@ -79,7 +79,24 @@ services:
   submit:
     networks:
       - proxy
-    image: xarthisius/aea-sivacor:latest
+    image: ${AEA_SIVACOR_IMAGE:-xarthisius/aea-sivacor:latest}
+    environment:
+      # The UI reads this via $env/dynamic/public, so adapter-node picks it up at
+      # RUNTIME -- no image rebuild needed to retarget a deployment. SvelteKit
+      # serves it to the browser from /_app/env.js, which is the quickest way to
+      # check what the client actually received:
+      #   curl -s https://submit.${domain}/_app/env.js
+      #
+      # The name matters. src/lib/api.ts:54 reads env.PUBLIC_SIVACOR_API_URL and
+      # falls back to a HARDCODED https://girder.sivacor.org/api/v1 -- so a typo
+      # or the wrong name does not fail, it silently points the test UI at
+      # production. Several .env* files in aea-sivacor define a bare
+      # SIVACOR_API_URL, which is NOT read: $env/dynamic/public uses SvelteKit's
+      # publicPrefix (PUBLIC_), unrelated to the adapter's envPrefix.
+      #
+      # Must keep the /api/v1 suffix: api.ts:190 does BASE_URL.replace('/api/v1', '')
+      # to build folder links.
+      - PUBLIC_SIVACOR_API_URL=https://girder.${domain}/api/v1
     deploy:
       replicas: 1
       labels:
