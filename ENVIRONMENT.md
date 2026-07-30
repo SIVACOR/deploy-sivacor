@@ -4,6 +4,20 @@
 `setup_girder.py`. The file is git-ignored; this is the tracked list of what it
 has to contain.
 
+> **Every line must start with `export`.** The Makefile runs
+> `. ./.env && docker stack config …`, and sourcing a bare `FOO=bar` creates a
+> *shell* variable, which a child process never sees. Without `export`, `docker
+> stack config` interpolates **every** `${…}` to the empty string.
+>
+> Only `REDIS_PASSWORD` fails loudly, because it is the one declared
+> `${REDIS_PASSWORD:?…}`. Everything else renders empty and deploys: host rules
+> become ``Host(`girder.`)``, `GOSU_USER` becomes `1000:1000:`, and the ACME
+> request asks for a certificate for `.` — a stack that comes up and serves
+> nothing. If you see
+> `required variable REDIS_PASSWORD is missing a value` while `grep REDIS_PASS
+> .env` clearly shows it, this is why: check for the `export` prefix, not the
+> value.
+
 ## Required
 
 | Variable | Purpose |
@@ -31,6 +45,7 @@ existing `.env` needs none of them.
 | `SIVACOR_MANAGER_QUEUES` | `local,sivacor,sivacor.static-01` | `local_worker`'s `--queues`. Drop `sivacor` to stop the manager accepting submissions once a remote worker exists. |
 | `DOCKER_HOST_TMP_ROOT` | `/home/ubuntu/deploy-dev/volumes` | Host path `lib.py` builds sibling-container bind-mount sources from. The default is the P0.8 open question — a `deploy-dev` path inside the production stack. Set it per host. |
 | `STATA_LICENSE_HOSTPATH` | `…/deploy-dev/volumes/licenses/stata.lic.19` | Same caveat. |
+| `GIRDER_EMAIL_TO_CONSOLE` | unset | Any **non-empty** value makes `notifications.py:_submitEmail` print the message to stdout and return before touching SMTP. Lets a test stack run with blank `GIRDER_SMTP_*`. Read the mail with `docker service logs -f wt_girder` — the `jobs.job.update.after` handler runs in the Girder server, so that is where submission mail is emitted, not the worker. **Note:** it is a bare truthiness check, so `false` also redirects; leave it unset to send for real. |
 | `DOCS_URL` | `https://docs.sivacor.org/` | Where the apex host redirects. |
 | `FEEDBACK_URL` | the Qualtrics form | Where `feedback.$domain` redirects. |
 

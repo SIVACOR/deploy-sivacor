@@ -112,6 +112,10 @@ services:
       - GIRDER_SETTING_CORE_SMTP_PASSWORD=${GIRDER_SMTP_PASSWORD}
       - GIRDER_SETTING_CORE_SMTP_PORT=465
       - GIRDER_SETTING_CORE_SMTP_USERNAME=${GIRDER_SMTP_USERNAME}
+      # Any NON-EMPTY value dumps mail to stdout instead of sending it --
+      # including the string "false", since notifications.py:154 is a bare
+      # os.environ.get() truthiness check. Leave it unset to send for real.
+      - GIRDER_EMAIL_TO_CONSOLE=${GIRDER_EMAIL_TO_CONSOLE:-}
       - GIRDER_SETTING_USER_QUOTA_DEFAULT_USER_QUOTA=10000000000
       - HOSTDIR=/
       - GIRDER_SIVACOR_TRO_GPG_PASSPHRASE=${GIRDER_SIVACOR_TRO_GPG_PASSPHRASE}
@@ -160,6 +164,10 @@ services:
       - GIRDER_SETTING_CORE_SMTP_PASSWORD=${GIRDER_SMTP_PASSWORD}
       - GIRDER_SETTING_CORE_SMTP_PORT=465
       - GIRDER_SETTING_CORE_SMTP_USERNAME=${GIRDER_SMTP_USERNAME}
+      # Any NON-EMPTY value dumps mail to stdout instead of sending it --
+      # including the string "false", since notifications.py:154 is a bare
+      # os.environ.get() truthiness check. Leave it unset to send for real.
+      - GIRDER_EMAIL_TO_CONSOLE=${GIRDER_EMAIL_TO_CONSOLE:-}
       - GIRDER_SETTING_USER_QUOTA_DEFAULT_USER_QUOTA=10000000000
       - GOSU_USER=1000:1000:${docker_group}
       - HOSTDIR=/
@@ -248,6 +256,10 @@ services:
       - GIRDER_SETTING_CORE_SMTP_PASSWORD=${GIRDER_SMTP_PASSWORD}
       - GIRDER_SETTING_CORE_SMTP_PORT=465
       - GIRDER_SETTING_CORE_SMTP_USERNAME=${GIRDER_SMTP_USERNAME}
+      # Any NON-EMPTY value dumps mail to stdout instead of sending it --
+      # including the string "false", since notifications.py:154 is a bare
+      # os.environ.get() truthiness check. Leave it unset to send for real.
+      - GIRDER_EMAIL_TO_CONSOLE=${GIRDER_EMAIL_TO_CONSOLE:-}
       - GIRDER_SETTING_USER_QUOTA_DEFAULT_USER_QUOTA=10000000000
       - DOCKER_HOST_TMP_ROOT=${DOCKER_HOST_TMP_ROOT:-/home/ubuntu/deploy-dev/volumes}
       # Must match the workers': the server encrypts job secrets, the worker

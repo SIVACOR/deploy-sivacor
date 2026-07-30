@@ -87,7 +87,7 @@ settings = [
         "key": "oauth.orcid_client_secret",
         "value": os.environ.get("ORCID_CLIENT_SECRET"),
     },
-    {"key": "oauth.providers_enabled", "value": ["globus", "orcid"]},
+    {"key": "oauth.providers_enabled", "value": ["globus"]},
     {
         "key": "sivacor.tro_gpg_fingerprint",
         "value": os.environ.get("GIRDER_SIVACOR_TRO_GPG_FINGERPRINT")
