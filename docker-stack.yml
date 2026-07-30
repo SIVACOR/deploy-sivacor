@@ -49,6 +49,15 @@ services:
       - "--accesslog=true"
       - "--accesslog.format=json"
       - "--accesslog.filepath=/dev/stdout"
+      # Traefik's default log level is ERROR, which is why a stack that never
+      # even attempts ACME looks completely silent. INFO shows certificate
+      # acquisition; DEBUG adds lego's DNS-01 challenge steps and is what you
+      # want when a cert is not appearing.
+      #
+      # Set here rather than in config.yml on purpose: that file is a bind mount
+      # and `docker stack config` does not interpolate it, so ${...} would not
+      # work there. CLI flags and --configFile coexist fine (verified).
+      - "--log.level=${TRAEFIK_LOG_LEVEL:-INFO}"
       - "--configFile=/etc/traefik/config.yml"
 
   mongo:
@@ -280,6 +289,24 @@ services:
         - "traefik.http.routers.girder.rule=Host(`girder.${domain}`)"
         - "traefik.http.routers.girder.entrypoints=https"
         - "traefik.http.routers.girder.tls=true"
+        # THE wildcard certificate request for the whole stack lives here.
+        #
+        # It used to sit on the `traefik-secure` router, which is defined by
+        # labels on the `traefik` service -- and that service carries
+        # `traefik.enable=false`, which makes the swarm provider discard EVERY
+        # label on it. So that router was never built, nothing ever asked for a
+        # certificate, and acme.json stayed at `"Certificates": null` with no
+        # error logged: nothing failed, nothing was attempted. Existing
+        # deployments only looked healthy because Traefik keeps renewing certs
+        # already in the store; a fresh host had nothing to renew.
+        #
+        # It lives on `girder` because that router must work for the stack to
+        # function at all, so the cert request can never be silently dropped by
+        # disabling some optional service. A wildcard covers exactly one label,
+        # hence main=${domain} plus sans=*.${domain}.
+        - "traefik.http.routers.girder.tls.certresolver=cloudflare"
+        - "traefik.http.routers.girder.tls.domains[0].main=${domain}"
+        - "traefik.http.routers.girder.tls.domains[0].sans=*.${domain}"
         - "traefik.http.services.girder.loadbalancer.server.port=8080"
         - "traefik.http.services.girder.loadbalancer.passhostheader=true"
         - "traefik.swarm.network=wt_proxy"

@@ -46,6 +46,7 @@ existing `.env` needs none of them.
 | `DOCKER_HOST_TMP_ROOT` | `/home/ubuntu/deploy-dev/volumes` | Host path `lib.py` builds sibling-container bind-mount sources from. The default is the P0.8 open question — a `deploy-dev` path inside the production stack. Set it per host. |
 | `STATA_LICENSE_HOSTPATH` | `…/deploy-dev/volumes/licenses/stata.lic.19` | Same caveat. |
 | `GIRDER_EMAIL_TO_CONSOLE` | unset | Any **non-empty** value makes `notifications.py:_submitEmail` print the message to stdout and return before touching SMTP. Lets a test stack run with blank `GIRDER_SMTP_*`. Read the mail with `docker service logs -f wt_girder` — the `jobs.job.update.after` handler runs in the Girder server, so that is where submission mail is emitted, not the worker. **Note:** it is a bare truthiness check, so `false` also redirects; leave it unset to send for real. |
+| `TRAEFIK_LOG_LEVEL` | `INFO` | Traefik's own default is `ERROR`, which makes certificate problems invisible. Use `DEBUG` to see lego's DNS-01 challenge steps when a cert is not appearing. Passed as a CLI flag because `traefik/config.yml` is a bind mount and is never interpolated. |
 | `DOCS_URL` | `https://docs.sivacor.org/` | Where the apex host redirects. |
 | `FEEDBACK_URL` | the Qualtrics form | Where `feedback.$domain` redirects. |
 
@@ -58,9 +59,24 @@ file edits. Two things to know:
 - A wildcard covers exactly one label. `*.sivacor.org` does **not** match
   `submit.test.sivacor.org`, which is why `tls.domains[0].main`/`.sans` are
   templated rather than pinned.
-- Only the `traefik-secure` router requests a certificate. Every other router
+- Exactly one router requests the certificate — **`girder`**. Every other router
   carries a bare `tls=true` and is served from the resulting store by SNI, so
-  those two labels decide TLS for the entire stack.
+  those three labels decide TLS for the entire stack.
+
+> **Why `girder` and not `traefik-secure`.** The request used to sit on the
+> `traefik-secure` router, defined by labels on the `traefik` service — which
+> carries `traefik.enable=false`. That flag makes the swarm provider discard
+> **every** label on the service, so the router was never built, no certificate
+> was ever requested, and `acme.json` stayed at `"Certificates": null` **with
+> nothing logged** — nothing failed, nothing was attempted. Long-running
+> deployments looked fine only because Traefik keeps renewing certificates
+> already in its store; a fresh host had nothing to renew and silently served
+> Traefik's self-signed default.
+>
+> The `traefik-secure` / `traefik` router labels are still on that service and
+> still inert. Setting `traefik.enable=true` would activate them and publish the
+> dashboard (behind the basicauth middleware already defined there), which looks
+> like the original intent. Left off for now — the cert no longer depends on it.
 
 The apex → docs and `feedback.$domain` → Qualtrics redirects used to live in
 `traefik/extra.yml` as a **file provider**, which `docker stack config` never
