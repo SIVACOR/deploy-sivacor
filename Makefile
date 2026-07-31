@@ -16,6 +16,7 @@ images:
 	docker pull xarthisius/girder:$(TAG)
 
 dirs: $(SUBDIRS)
+	@touch traefik/acme.json && chmod 600 traefik/acme.json
 
 $(SUBDIRS):
 	@sudo mkdir -p $@
