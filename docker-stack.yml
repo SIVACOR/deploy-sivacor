@@ -162,6 +162,25 @@ services:
 
   local_worker:
     image: ${GIRDER_SIVACOR_IMAGE:-docker.io/xarthisius/girder-sivacor:latest}
+    # uid 1000 (girder) with the HOST's docker group as its primary group. This is
+    # the only way a Swarm service gets socket access: `docker stack config` rejects
+    # compose's `group_add`, so the `--group-add` trick the off-box workers use is
+    # unavailable here.
+    #
+    # Why it is not hardcoded: the image bakes `groupadd -g 112 docker`
+    # (Dockerfile:98), and a fresh JS2 Ubuntu 24.04 instance came up with GID **127**
+    # -- so the long-held "JS2 is always 112" assumption is false. Left at 112 this
+    # service silently loses the socket and every analysis container fails to start.
+    # The Makefile discovers the real GID at deploy time, so there is nothing to keep
+    # in sync by hand; `:?` is there because an empty value would render `user: 1000:`
+    # and fail obscurely at task start.
+    #
+    # NO HYPHEN IN THE :? MESSAGE. compose parses the text after the first `-` as a
+    # `:-` default, so `${x:?must be set - see Makefile}` silently resolves to
+    # " see Makefile" instead of erroring. That renders `user: '1000: see Makefile'`
+    # and the guard becomes a no-op. REDIS_PASSWORD's guard works because its message
+    # happens to contain no hyphen.
+    user: "1000:${docker_group:?docker_group must be set, the Makefile discovers it}"
     networks:
       - celery
       - mongo
@@ -195,7 +214,9 @@ services:
       # os.environ.get() truthiness check. Leave it unset to send for real.
       - GIRDER_EMAIL_TO_CONSOLE=${GIRDER_EMAIL_TO_CONSOLE:-}
       - GIRDER_SETTING_USER_QUOTA_DEFAULT_USER_QUOTA=10000000000
-      - GOSU_USER=1000:1000:${docker_group}
+      # GOSU_USER is NOT set: nothing in the plugin or the image reads it (there is
+      # no gosu binary and no entrypoint script -- it is dead WholeTale config).
+      # Socket access comes from the `user:` line above instead.
       - HOSTDIR=/
       - GIRDER_SIVACOR_TRO_GPG_PASSPHRASE=${GIRDER_SIVACOR_TRO_GPG_PASSPHRASE}
       - GIRDER_SIVACOR_TRO_GPG_FINGERPRINT=${GIRDER_SIVACOR_TRO_GPG_FINGERPRINT}

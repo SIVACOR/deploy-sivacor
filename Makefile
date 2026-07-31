@@ -23,8 +23,14 @@ $(SUBDIRS):
 
 services: dirs
 
-dev: services 
-	. ./.env && docker stack config --compose-file docker-stack.yml | docker stack deploy --compose-file - wt
+# Discovered here, not stored in .env: the docker group's GID is a property of THIS
+# host, and a stale value in .env is invisible until analysis containers stop
+# starting. local_worker's `user:` needs it because Swarm has no group_add. Exported
+# after sourcing .env so an explicit value there still wins if a host needs one.
+dev: services
+	. ./.env && export docker_group="$${docker_group:-$$(getent group docker | cut -d: -f3)}" && \
+	  echo "--- docker group on this host: $${docker_group} ---" && \
+	  docker stack config --compose-file docker-stack.yml | docker stack deploy --compose-file - wt
 	cid=$$(docker ps --filter=name=wt_girder -q);
 	while [ -z $${cid} ] ; do \
 		  echo $${cid} ; \
