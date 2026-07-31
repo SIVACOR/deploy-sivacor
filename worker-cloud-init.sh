@@ -16,7 +16,12 @@ exec > >(tee -a /var/log/sivacor-provision.log) 2>&1
 echo "=== provisioning started $(date -Is) ==="
 
 # ---- config: review these before launching -------------------------------
-WORKER_IMAGE="docker.io/xarthisius/girder-sivacor:p0-correctness"
+# Convention: the tag tracks the branch name, so worker and manager are provably
+# the same build. NOTHING BUILDS THIS AUTOMATICALLY -- .github/workflows/docker.yml
+# only pushes `latest`, and only from `main`. Build and push this tag by hand after
+# any change to girder-sivacor, or a fresh VM boots stale code. When `distributed`
+# merges to main, this becomes `latest`.
+WORKER_IMAGE="docker.io/xarthisius/girder-sivacor:distributed"
 GIRDER_HOST="girder.test.sivacor.org"
 # Manager's TENANT ip, not its floating ip: OpenStack does not hairpin floating
 # ips, and this keeps multi-GB uploads off the NAT. TLS still verifies (the cert
