@@ -3,9 +3,16 @@
 # Runs once as root on first boot. Log: /var/log/sivacor-provision.log
 # Full rationale: autoscaling_plan.md P1.2. Post-boot steps: ~/NEXT_STEPS.md
 #
-# NO SECRETS HERE: user-data is readable on the instance via
-# curl http://169.254.169.254/openstack/latest/user_data and visible in the
-# OpenStack API. Credentials go in /etc/sivacor/worker.env after boot.
+# SECRETS: MASTER_KEY_HEX and REDIS_PASSWORD may be supplied in the config block
+# below, and under autoscaling they are. DELIBERATE -- do not "fix" it. Both are
+# shared-fleet values and anyone who can read this user-data can boot a worker and
+# read them off it anyway. The real cost is that user-data outlives the instance in
+# Nova's DB, so treat both as permanently disclosed to anyone who ever gets project
+# read access, and rotate on membership change. Reasoning: autoscaling_plan.md P2.2.
+# Left empty -> worker.env gets FILL_ME and the unit stays stopped, as before.
+#
+# KEEP THIS FILE UNDER 16 KB: that is the limit on Horizon's Customization Script
+# field. Put rationale in autoscaling_plan.md and a pointer here.
 #
 # Target: JS2 Ubuntu 24.04 (noble), m3.medium+ (needs the 60 GB root disk).
 # Verified 2026-07-30 on sivacor-test-worker-01: 92s, docker.io 29.1.3 already
@@ -30,9 +37,16 @@ MANAGER_TENANT_IP="10.3.37.197"
 # Cold-pulling analysis images mid-run dominates latency (D4). stata/dynare are
 # large - add only if this worker runs them.
 PREPULL_IMAGES=("rocker/r-ver:4.3.1")
-# Empty -> sivacor.<hostname>, unique per VM with no coordination.
+# Empty -> sivacor.<instance-uuid>, unique per VM with no coordination.
 WORKER_QUEUE_OVERRIDE=""
 DEPLOY_USER="ubuntu"; DEPLOY_UID=1000; DEPLOY_GID=1000
+
+# ---- secrets: filled in by the controller; empty = provision manually --------
+# See the SECRETS note in the header before changing how these are delivered.
+# Both must match the manager byte for byte. When BOTH are set, this script
+# writes a complete worker.env and starts the worker itself -- no manual step.
+MASTER_KEY_HEX=""
+REDIS_PASSWORD=""
 
 # ---- packages ------------------------------------------------------------
 export DEBIAN_FRONTEND=noninteractive
@@ -61,15 +75,11 @@ grep -q "[[:space:]]${GIRDER_HOST}\$" /etc/hosts || \
 # A chain is pinned to this queue after its first step (later steps need the
 # local workdir), so the name must be stable for the life of the instance.
 #
-# Prefer the OpenStack instance UUID over the hostname: it is unique per instance
-# by construction, with no coordination and no registry, which is what an
-# autoscaler needs when it is creating instances from one template. Hostnames are
-# derived from the instance *name* and two instances can share one, which would
-# silently merge two submissions onto a single queue -- each stealing steps that
-# expect the other's workspace.
-#
-# Falls back to the hostname if the metadata service is unreachable: a worker with
-# a slightly worse queue name is better than a VM that failed to provision.
+# Instance UUID beats hostname: unique by construction, no coordination. Hostnames
+# derive from the instance *name*, and two instances sharing one would silently
+# merge two submissions onto a single queue, each stealing steps that expect the
+# other's workspace. Falls back to hostname if metadata is unreachable -- a worse
+# queue name beats a VM that failed to provision.
 if ! WORKER_UUID=$(curl -sf --max-time 5 \
       http://169.254.169.254/openstack/latest/meta_data.json | jq -re .uuid); then
   WORKER_UUID=""
@@ -81,19 +91,29 @@ echo "--- queue: ${WORKER_QUEUE} ---"
 # ---- env file: docker --env-file format ----------------------------------
 # Bare KEY=VALUE. NO 'export', NO quotes (quotes become part of the value).
 # deploy-sivacor/.env is the opposite - it is shell-sourced and needs 'export'.
+#
+# Supplied secrets go in verbatim; anything left empty becomes FILL_ME so that
+# preflight fails loudly rather than the worker starting with a broken broker URL.
+if [ -n "$MASTER_KEY_HEX" ] && [ -n "$REDIS_PASSWORD" ]; then
+  SECRETS_SUPPLIED=1
+  echo "--- secrets supplied via user-data; worker will self-start ---"
+else
+  SECRETS_SUPPLIED=0
+  echo "--- secrets NOT supplied; worker.env gets placeholders, unit left stopped ---"
+fi
 cat > /etc/sivacor/worker.env <<EOF
 # Generated $(date -Is). Format: docker --env-file (no export, no quotes).
-# Fill the FILL_ME values, then:
+# Any FILL_ME below must be replaced, then:
 #   sudo sivacor-worker-preflight && sudo systemctl enable --now sivacor-worker
 
 # Must match the server byte for byte (server encrypts job secrets, worker
 # decrypts). Copy from deploy-sivacor/.env on the manager.
-MASTER_KEY_HEX=FILL_ME
+MASTER_KEY_HEX=${MASTER_KEY_HEX:-FILL_ME}
 
 # Same redis password as the manager, in all three.
-GIRDER_WORKER_BROKER=redis://:FILL_ME@${MANAGER_TENANT_IP}:6379/
-GIRDER_WORKER_BACKEND=redis://:FILL_ME@${MANAGER_TENANT_IP}:6379/
-GIRDER_NOTIFICATION_REDIS_URL=redis://:FILL_ME@${MANAGER_TENANT_IP}:6379/
+GIRDER_WORKER_BROKER=redis://:${REDIS_PASSWORD:-FILL_ME}@${MANAGER_TENANT_IP}:6379/
+GIRDER_WORKER_BACKEND=redis://:${REDIS_PASSWORD:-FILL_ME}@${MANAGER_TENANT_IP}:6379/
+GIRDER_NOTIFICATION_REDIS_URL=redis://:${REDIS_PASSWORD:-FILL_ME}@${MANAGER_TENANT_IP}:6379/
 
 # NOTE: no GPG settings here, deliberately. TRO signing runs on the MANAGER (the
 # sign step is dispatched to the 'local' queue, which only the manager's
@@ -256,19 +276,19 @@ to ${MANAGER_TENANT_IP}; worker image pulled; docker GID ${DOCKER_GID} in
 GOSU_USER; queue ${WORKER_QUEUE}; systemd unit installed but stopped.
 
 ## 1. Credentials -- sudo nano /etc/sivacor/worker.env
-MASTER_KEY_HEX (from the manager's .env, must match exactly) and the redis
-password in all three redis:// URLs. Format: no 'export', no quotes.
+SKIP THIS if provisioning reported "secrets supplied via user-data": the file is
+already complete and the worker was started for you. Check with
+'systemctl status sivacor-worker'.
+
+Otherwise fill MASTER_KEY_HEX (from the manager's .env, must match exactly) and
+the redis password in all three redis:// URLs. Format: no 'export', no quotes.
+Preflight fails while any FILL_ME remains, so nothing starts half-configured.
 
 ## 2. No signing key -- nothing to do here
-This host holds NO TRS key material, by design. The sign step is dispatched to
-the manager's 'local' queue, and since tro-utils 0.4.6 nothing outside signing
-opens a keyring, so a worker needs neither the key nor the gpg binary. A
-compromised worker therefore cannot mint a TRO.
-
-The fingerprint and passphrase live only in the sivacor.tro_gpg_fingerprint /
-_passphrase Girder settings and are read server-side. If you find yourself
-creating /home/${DEPLOY_USER}/.gnupg on a worker, something has regressed --
-preflight check 5 fails on exactly that.
+This host holds NO TRS key material, by design: signing runs on the manager, and
+since tro-utils 0.4.6 nothing outside signing opens a keyring. So a compromised
+worker cannot mint a TRO. If you find yourself creating .gnupg here, something has
+regressed -- preflight check 5 fails on exactly that.
 
 ## 3. Stata license (only if this worker runs Stata)
 Copy to /home/${DEPLOY_USER}/volumes/licenses/stata.lic.19 - without it Stata
@@ -281,16 +301,31 @@ exits non-zero and the visible error looks unrelated.
 
 ## 5. On the manager
 Set SIVACOR_MANAGER_QUEUES=local,sivacor.static-01 so it stops taking
-submissions, then:
+submissions, then confirm the split:
     celery -A girder_worker.app inspect active_queues
     # manager: local, sivacor.static-01   worker: sivacor, ${WORKER_QUEUE}
-
-Then P1 exit criteria: submit a job, watch meta.heartbeat advance, confirm live
-logs reach the UI and the result package uploads through Traefik, then
-'docker kill sivacor-worker' mid-run and check the job flips to ERROR with the
-failure email in 'docker service logs wt_girder'.
 EOF
 chown "$DEPLOY_UID":"$DEPLOY_GID" /home/"$DEPLOY_USER"/NEXT_STEPS.md
-printf '\n*** SIVACOR worker: read ~/NEXT_STEPS.md, credentials still needed ***\n\n' > /etc/motd
 
-echo "=== finished $(date -Is): queue=${WORKER_QUEUE} docker_gid=${DOCKER_GID} ==="
+# ---- start, if we were given everything needed ---------------------------
+# Hands-off boot: with secrets supplied nothing is left for a human, so waiting for
+# one would just mean an instance that never consumes anything. Preflight gates the
+# start -- it catches an unreachable broker (security group), unreachable Girder
+# (floating-ip hairpin) and an unusable docker socket, each of which otherwise looks
+# like a worker that starts and silently does nothing. A preflight failure is NOT
+# fatal to provisioning: the VM stays up so the log can be read, and an autoscaler
+# should reap anything that never registers with celery (P3.4 circuit breaker).
+if [ "$SECRETS_SUPPLIED" = 1 ]; then
+  printf '\n*** SIVACOR worker: provisioned and starting automatically ***\n\n' > /etc/motd
+  if sivacor-worker-preflight; then
+    systemctl enable --now sivacor-worker
+    echo "--- worker started; queue ${WORKER_QUEUE} ---"
+  else
+    printf '\n*** SIVACOR worker: PREFLIGHT FAILED - see /var/log/sivacor-provision.log ***\n\n' > /etc/motd
+    echo "!! preflight failed; worker NOT started"
+  fi
+else
+  printf '\n*** SIVACOR worker: read ~/NEXT_STEPS.md, credentials still needed ***\n\n' > /etc/motd
+fi
+
+echo "=== finished $(date -Is): queue=${WORKER_QUEUE} docker_gid=${DOCKER_GID} secrets=${SECRETS_SUPPLIED} ==="
