@@ -26,7 +26,7 @@ GIRDER_HOST="girder.test.sivacor.org"
 # Manager's TENANT ip, not its floating ip: OpenStack does not hairpin floating
 # ips, and this keeps multi-GB uploads off the NAT. TLS still verifies (the cert
 # is bound to the hostname, not the address).
-MANAGER_TENANT_IP="10.3.37.91"
+MANAGER_TENANT_IP="10.3.37.197"
 # Cold-pulling analysis images mid-run dominates latency (D4). stata/dynare are
 # large - add only if this worker runs them.
 PREPULL_IMAGES=("rocker/r-ver:4.3.1")
@@ -37,7 +37,9 @@ DEPLOY_USER="ubuntu"; DEPLOY_UID=1000; DEPLOY_GID=1000
 # ---- packages ------------------------------------------------------------
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -q
-apt-get install -y -q docker.io redis-tools gnupg ca-certificates curl jq
+# No gnupg: since tro-utils 0.4.6 the keyring is only touched when signing, and
+# signing runs on the manager. A worker needs no key material and no gpg binary.
+apt-get install -y -q docker.io redis-tools ca-certificates curl jq
 systemctl enable --now docker
 
 # ---- docker GID: differs per VM, so discover rather than hardcode ---------
@@ -49,8 +51,6 @@ echo "--- docker GID: ${DOCKER_GID} ---"
 install -d -o "$DEPLOY_UID" -g "$DEPLOY_GID" -m 755  /home/"$DEPLOY_USER"/volumes
 install -d -o "$DEPLOY_UID" -g "$DEPLOY_GID" -m 1777 /home/"$DEPLOY_USER"/volumes/tmp
 install -d -o "$DEPLOY_UID" -g "$DEPLOY_GID" -m 755  /home/"$DEPLOY_USER"/volumes/licenses
-# 700 or gpg refuses the homedir; container runs as uid 1000.
-install -d -o "$DEPLOY_UID" -g "$DEPLOY_GID" -m 700  /home/"$DEPLOY_USER"/.gnupg
 install -d -m 755 /etc/sivacor
 
 # ---- pin Girder to the tenant address ------------------------------------
@@ -80,17 +80,12 @@ GIRDER_WORKER_BROKER=redis://:FILL_ME@${MANAGER_TENANT_IP}:6379/
 GIRDER_WORKER_BACKEND=redis://:FILL_ME@${MANAGER_TENANT_IP}:6379/
 GIRDER_NOTIFICATION_REDIS_URL=redis://:FILL_ME@${MANAGER_TENANT_IP}:6379/
 
-# Signing runs on the worker while D2 is open, so the KEY MATERIAL must be in
-# /home/${DEPLOY_USER}/.gnupg here. But the fingerprint and passphrase the worker
-# actually signs with come from the SERVER: run_submission.py:343,361 reads the
-# sivacor.tro_gpg_fingerprint / _passphrase Girder settings and passes those to
-# TRO(). These two variables are read by NOTHING in the plugin -- they exist only
-# so preflight can check the key. They MUST equal the server's settings, or
-# tro_utils raises KeyError(<server fingerprint>) mid-submission.
-#   On the manager: curl -H "Girder-Token: \$T" -X PUT \
-#     "https://${GIRDER_HOST}/api/v1/system/setting?key=sivacor.tro_gpg_fingerprint&value=<FPR>"
-GIRDER_SIVACOR_TRO_GPG_FINGERPRINT=FILL_ME
-GIRDER_SIVACOR_TRO_GPG_PASSPHRASE=FILL_ME
+# NOTE: no GPG settings here, deliberately. TRO signing runs on the MANAGER (the
+# sign step is dispatched to the 'local' queue, which only the manager's
+# co-located worker consumes), and since tro-utils 0.4.6 nothing outside signing
+# touches a keyring. A worker holds no key material, so a compromised worker
+# cannot mint a TRO. The fingerprint and passphrase live only in the
+# sivacor.tro_gpg_fingerprint / _passphrase Girder settings, read server-side.
 
 # Discovered at provision time.
 GIRDER_API_URL=https://${GIRDER_HOST}/api/v1
@@ -151,7 +146,6 @@ ExecStart=/usr/bin/docker run --rm --name sivacor-worker \\
   --group-add ${DOCKER_GID} \\
   -v /var/run/docker.sock:/var/run/docker.sock \\
   -v /home/${DEPLOY_USER}/volumes/tmp:/tmp \\
-  -v /home/${DEPLOY_USER}/.gnupg:/home/girder/.gnupg \\
   ${WORKER_IMAGE} \\
   -- celery --app=girder_worker.app worker \\
     --queues=sivacor,${WORKER_QUEUE} \\
@@ -196,15 +190,18 @@ c=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "${GIRDER_API_URL}/sys
 [ "$c" = 200 ] && ok "200 from ${GIRDER_API_URL}" \
   || bad "got '${c}' - cert, DNS, or floating-ip hairpin"
 
-echo "5. gpg signing key (fingerprint here must equal the SERVER setting)"
-G="sudo -u ubuntu GNUPGHOME=/home/ubuntu/.gnupg gpg"
-F="${GIRDER_SIVACOR_TRO_GPG_FINGERPRINT:-}"
-if [ ${#F} -ne 40 ]; then bad "fingerprint is ${#F} chars, needs the full 40"
-elif ! $G --list-keys "$F" >/dev/null 2>&1; then bad "no PUBLIC key for $F (tro_utils calls list_keys() without secret=True)"
-elif ! $G --list-secret-keys "$F" >/dev/null 2>&1; then bad "public key but no SECRET key for $F"
-elif $G --batch --pinentry-mode loopback --passphrase "$GIRDER_SIVACOR_TRO_GPG_PASSPHRASE" \
-        --local-user "$F" --detach-sign --output /dev/null <<<x 2>/dev/null; then ok "signed a test payload"
-else bad "key present but signing failed - wrong passphrase, or loopback pinentry refused"; fi
+echo "5. no key material on this host"
+# A worker must not be able to sign. Signing is dispatched to the manager's
+# 'local' queue, and since tro-utils 0.4.6 nothing else opens a keyring -- so a
+# keyring here is not merely unused, it is a trust-boundary regression that
+# nothing else would flag.
+if [ -e /home/ubuntu/.gnupg ]; then
+  bad "/home/ubuntu/.gnupg exists - workers must hold no TRS key material; remove it"
+elif command -v gpg >/dev/null 2>&1 && sudo -u ubuntu gpg --list-secret-keys 2>/dev/null | grep -q .; then
+  bad "a secret key is present in ubuntu's default keyring - remove it"
+else
+  ok "no keyring, no secret keys"
+fi
 
 echo "6. docker socket reachable FROM THE IMAGE"
 # Not a GOSU_USER comparison: nothing reads GOSU_USER. What matters is whether
@@ -221,6 +218,9 @@ fi
 
 echo "7. must-not-be-set"
 grep -qE '^GIRDER_MONGO_URI=' "$E" && bad "GIRDER_MONGO_URI set - worker must not reach Mongo" || ok "absent"
+grep -qE '^GIRDER_SIVACOR_TRO_GPG_' "$E" \
+  && bad "TRO GPG settings present - signing happens on the manager; nothing reads these" \
+  || ok "no GPG settings"
 
 echo
 [ "$fail" = 0 ] && echo "PASSED - sudo systemctl enable --now sivacor-worker" || echo "FAILED - fix the above first"
@@ -235,46 +235,25 @@ cat > /home/"$DEPLOY_USER"/NEXT_STEPS.md <<EOF
 Provisioned $(date -Is). Log: /var/log/sivacor-provision.log
 Details: autoscaling_plan.md P1.2
 
-Done already: docker + redis-tools; ${DEPLOY_USER} in docker group; volumes/tmp,
-volumes/licenses, .gnupg created with correct owner/mode; ${GIRDER_HOST} pinned
+Done already: docker + redis-tools; ${DEPLOY_USER} in docker group; volumes/tmp
+and volumes/licenses created with correct owner/mode; ${GIRDER_HOST} pinned
 to ${MANAGER_TENANT_IP}; worker image pulled; docker GID ${DOCKER_GID} in
 GOSU_USER; queue ${WORKER_QUEUE}; systemd unit installed but stopped.
 
 ## 1. Credentials -- sudo nano /etc/sivacor/worker.env
-MASTER_KEY_HEX (from the manager's .env, must match exactly), the redis password
-in all three redis:// URLs, and the GPG fingerprint/passphrase from step 2.
-Format: no 'export', no quotes.
+MASTER_KEY_HEX (from the manager's .env, must match exactly) and the redis
+password in all three redis:// URLs. Format: no 'export', no quotes.
 
-## 2. TRS signing key
-Signing runs here while D2 is open, so the key material must be in
-/home/${DEPLOY_USER}/.gnupg. Use a THROWAWAY key - a TRO signed with the
-production key is indistinguishable from a real one.
+## 2. No signing key -- nothing to do here
+This host holds NO TRS key material, by design. The sign step is dispatched to
+the manager's 'local' queue, and since tro-utils 0.4.6 nothing outside signing
+opens a keyring, so a worker needs neither the key nor the gpg binary. A
+compromised worker therefore cannot mint a TRO.
 
-IMPORTANT: the fingerprint and passphrase the worker signs with come from the
-SERVER, not from worker.env (run_submission.py:343,361 reads the
-sivacor.tro_gpg_fingerprint / _passphrase settings). The two must match, or you
-get KeyError(<server fingerprint>) mid-submission. After generating below, set
-the server side from the manager:
-
-    T=\$(curl -s -X POST -u admin "https://${GIRDER_HOST}/api/v1/user/authentication" | jq -r .authToken.token)
-    for kv in "sivacor.tro_gpg_fingerprint=\$FPR" "sivacor.tro_gpg_passphrase=\$PASS"; do
-      curl -s -X PUT -H "Girder-Token: \$T" \
-        "https://${GIRDER_HOST}/api/v1/system/setting?key=\${kv%%=*}&value=\${kv#*=}"
-    done
-
-and put the same values in the manager's .env
-(GIRDER_SIVACOR_TRO_GPG_FINGERPRINT / _PASSPHRASE) so setup_girder.py does not
-revert them on the next make dev.
-
-    sudo -u ${DEPLOY_USER} GNUPGHOME=/home/${DEPLOY_USER}/.gnupg gpg --batch \\
-      --pinentry-mode loopback --passphrase 'PASS' \\
-      --quick-generate-key "SIVACOR TRS (test) <support@sivacor.org>" rsa4096 sign 2y
-    sudo -u ${DEPLOY_USER} GNUPGHOME=/home/${DEPLOY_USER}/.gnupg gpg \\
-      --list-keys --with-colons | awk -F: '/^fpr:/ {print \$10; exit}'
-
-If importing instead, the PUBLIC half must be in the keyring too, then
-chown -R ${DEPLOY_UID}:${DEPLOY_GID} /home/${DEPLOY_USER}/.gnupg
-Back up openpgp-revocs.d/<FPR>.rev off-box.
+The fingerprint and passphrase live only in the sivacor.tro_gpg_fingerprint /
+_passphrase Girder settings and are read server-side. If you find yourself
+creating /home/${DEPLOY_USER}/.gnupg on a worker, something has regressed --
+preflight check 5 fails on exactly that.
 
 ## 3. Stata license (only if this worker runs Stata)
 Copy to /home/${DEPLOY_USER}/volumes/licenses/stata.lic.19 - without it Stata
