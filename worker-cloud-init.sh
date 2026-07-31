@@ -28,25 +28,32 @@ echo "=== provisioning started $(date -Is) ==="
 # only pushes `latest`, and only from `main`. Build and push this tag by hand after
 # any change to girder-sivacor, or a fresh VM boots stale code. When `distributed`
 # merges to main, this becomes `latest`.
-WORKER_IMAGE="docker.io/xarthisius/girder-sivacor:distributed"
-GIRDER_HOST="girder.test.sivacor.org"
+# launch-worker.py replaces the marker line below with assignments. Everything in
+# this block therefore uses ${VAR:-default}, so an injected value wins and a
+# hand-pasted run still works. Keep the marker on its own line, spelled exactly.
+#__SIVACOR_INJECT__
+
+WORKER_IMAGE="${WORKER_IMAGE:-docker.io/xarthisius/girder-sivacor:distributed}"
+GIRDER_HOST="${GIRDER_HOST:-girder.test.sivacor.org}"
 # Manager's TENANT ip, not its floating ip: OpenStack does not hairpin floating
 # ips, and this keeps multi-GB uploads off the NAT. TLS still verifies (the cert
 # is bound to the hostname, not the address).
-MANAGER_TENANT_IP="10.3.37.197"
-# Cold-pulling analysis images mid-run dominates latency (D4). stata/dynare are
-# large - add only if this worker runs them.
-PREPULL_IMAGES=("rocker/r-ver:4.3.1")
+MANAGER_TENANT_IP="${MANAGER_TENANT_IP:-10.3.37.197}"
+# Analysis images fetched before the worker starts. The CONTROLLER sets this to the
+# images the submission's workflow names -- a certainty, not a guess, and pulled before
+# the worker accepts the task rather than silently mid-run. Guessing wrong costs
+# startup time and disk the payload needs (D6). Empty unless you know. See P2.1.
+declare -p PREPULL_IMAGES >/dev/null 2>&1 || PREPULL_IMAGES=()
 # Empty -> sivacor.<instance-uuid>, unique per VM with no coordination.
-WORKER_QUEUE_OVERRIDE=""
+WORKER_QUEUE_OVERRIDE="${WORKER_QUEUE_OVERRIDE:-}"
 DEPLOY_USER="ubuntu"; DEPLOY_UID=1000; DEPLOY_GID=1000
 
 # ---- secrets: filled in by the controller; empty = provision manually --------
 # See the SECRETS note in the header before changing how these are delivered.
 # Both must match the manager byte for byte. When BOTH are set, this script
 # writes a complete worker.env and starts the worker itself -- no manual step.
-MASTER_KEY_HEX=""
-REDIS_PASSWORD=""
+MASTER_KEY_HEX="${MASTER_KEY_HEX:-}"
+REDIS_PASSWORD="${REDIS_PASSWORD:-}"
 
 # ---- packages ------------------------------------------------------------
 export DEBIAN_FRONTEND=noninteractive
@@ -270,10 +277,8 @@ cat > /home/"$DEPLOY_USER"/NEXT_STEPS.md <<EOF
 Provisioned $(date -Is). Log: /var/log/sivacor-provision.log
 Details: autoscaling_plan.md P1.2
 
-Done already: docker + redis-tools; ${DEPLOY_USER} in docker group; volumes/tmp
-and volumes/licenses created with correct owner/mode; ${GIRDER_HOST} pinned
-to ${MANAGER_TENANT_IP}; worker image pulled; docker GID ${DOCKER_GID} in
-GOSU_USER; queue ${WORKER_QUEUE}; systemd unit installed but stopped.
+Already done (see the log for detail): packages, dirs, ${GIRDER_HOST} -> ${MANAGER_TENANT_IP},
+worker image, docker GID ${DOCKER_GID}, queue ${WORKER_QUEUE}, systemd unit.
 
 ## 1. Credentials -- sudo nano /etc/sivacor/worker.env
 SKIP THIS if provisioning reported "secrets supplied via user-data": the file is

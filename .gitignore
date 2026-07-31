@@ -8,3 +8,4 @@ homes/*
 ps/*
 .env*
 venv/
+__pycache__/
