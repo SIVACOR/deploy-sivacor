@@ -59,8 +59,23 @@ grep -q "[[:space:]]${GIRDER_HOST}\$" /etc/hosts || \
 
 # ---- worker identity -----------------------------------------------------
 # A chain is pinned to this queue after its first step (later steps need the
-# local workdir), so the name must be stable across restarts.
-WORKER_QUEUE="${WORKER_QUEUE_OVERRIDE:-sivacor.$(hostname -s)}"
+# local workdir), so the name must be stable for the life of the instance.
+#
+# Prefer the OpenStack instance UUID over the hostname: it is unique per instance
+# by construction, with no coordination and no registry, which is what an
+# autoscaler needs when it is creating instances from one template. Hostnames are
+# derived from the instance *name* and two instances can share one, which would
+# silently merge two submissions onto a single queue -- each stealing steps that
+# expect the other's workspace.
+#
+# Falls back to the hostname if the metadata service is unreachable: a worker with
+# a slightly worse queue name is better than a VM that failed to provision.
+if ! WORKER_UUID=$(curl -sf --max-time 5 \
+      http://169.254.169.254/openstack/latest/meta_data.json | jq -re .uuid); then
+  WORKER_UUID=""
+  echo "!! metadata service unreachable; falling back to hostname for the queue name"
+fi
+WORKER_QUEUE="${WORKER_QUEUE_OVERRIDE:-sivacor.${WORKER_UUID:-$(hostname -s)}}"
 echo "--- queue: ${WORKER_QUEUE} ---"
 
 # ---- env file: docker --env-file format ----------------------------------
