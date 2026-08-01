@@ -59,6 +59,14 @@ IDLE_TIMEOUT_SEC="${IDLE_TIMEOUT_SEC:-300}"
 # Nothing powers off before this much uptime, so a VM booted for a still-queued
 # submission gets time to be handed it. Provisioning alone is ~90 s.
 BOOT_GRACE_SEC="${BOOT_GRACE_SEC:-600}"
+# Consecutive ticks celery may be unreachable before the VM reclaims itself anyway.
+# At the 2 min timer that is ~16 min. See the "unreachable" note in the supervisor:
+# a worker whose broker connection is dead cannot receive tasks, cannot finish a
+# chain and cannot be told anything -- treating that as "busy" forever is what left
+# two VMs immortal on 2026-08-01. Deliberately far longer than any signing round
+# trip (~1 s observed, 300 s timeout), because that is the one window where a
+# healthy worker is legitimately idle mid-chain.
+UNREACHABLE_TICKS="${UNREACHABLE_TICKS:-8}"
 DEPLOY_USER="ubuntu"; DEPLOY_UID=1000; DEPLOY_GID=1000
 
 # ---- secrets: filled in by the controller; empty = provision manually --------
@@ -239,21 +247,36 @@ cat > /usr/local/bin/sivacor-worker-idle-check <<PRE
 # when all four checks below agree, and logs its reasoning either way.
 IDLE_TIMEOUT_SEC=${IDLE_TIMEOUT_SEC}
 BOOT_GRACE_SEC=${BOOT_GRACE_SEC}
+UNREACHABLE_TICKS=${UNREACHABLE_TICKS}
 PRE
 cat >> /usr/local/bin/sivacor-worker-idle-check <<'IDLE'
 WORKER_CONTAINER=sivacor-worker
-STATE=/run/sivacor-idle-since   # /run is tmpfs, so this resets on boot
+STATE=/run/sivacor-idle-since   # /run is tmpfs, so both reset on boot
+FAILS=/run/sivacor-probe-failures
 
 log() { echo "$(date -Is) $*"; }
 
-# Clear the idle clock and stop. Any doubt lands here.
-busy() { rm -f "$STATE"; log "BUSY: $* -- staying up"; exit 0; }
+# THREE outcomes, not two. The original had only `busy`, which cleared the idle
+# clock unconditionally -- so a probe that merely *failed* threw away up to
+# IDLE_TIMEOUT_SEC of accumulated evidence, and a persistently failing probe reset
+# it on every tick, forever. That is precisely how sivacor-worker-3a052548 became
+# immortal on 2026-08-01: it was on the very tick that would have powered it off
+# when `celery inspect` started failing, and every later tick wiped the clock again.
+#
+#   busy        -- positive evidence of work. Clear the clock; that is correct.
+#   blocked     -- cannot observe at all. Keep the clock, keep the failure count
+#                  out of it, stay up. Costs one tick, not the whole clock.
+#   unreachable -- celery specifically will not answer, but we have already
+#                  confirmed uptime past the grace and no analysis containers.
+#                  Count it; reclaim once it is clearly not coming back.
+busy()    { rm -f "$STATE" "$FAILS"; log "BUSY: $* -- staying up"; exit 0; }
+blocked() { log "BLOCKED: $* -- staying up, idle clock preserved"; exit 0; }
 
 # 1. Boot grace. A VM created for a queued submission must not power off before
 #    it has had a chance to be handed one.
 uptime_sec=$(cut -d. -f1 /proc/uptime 2>/dev/null)
 case "$uptime_sec" in
-  ''|*[!0-9]*) busy "cannot read /proc/uptime" ;;
+  ''|*[!0-9]*) blocked "cannot read /proc/uptime" ;;
 esac
 [ "$uptime_sec" -lt "$BOOT_GRACE_SEC" ] && \
   busy "uptime ${uptime_sec}s < boot grace ${BOOT_GRACE_SEC}s"
@@ -261,8 +284,11 @@ esac
 # 2. Analysis containers. These are SIBLINGS started through the docker socket,
 #    not children of the celery task, so one can outlive the task that started it
 #    (P1.3 finding 9). "celery is idle" is therefore not "safe to reclaim".
+# A broken docker socket is `blocked`, not `busy`: we cannot see containers, so we
+# must not reclaim -- but it is not evidence of work either, and it must not gate
+# the unreachable counter below, which assumes this check actually passed.
 if ! ps_out=$(docker ps --format '{{.Names}}' 2>&1); then
-  busy "docker ps failed: ${ps_out}"
+  blocked "docker ps failed: ${ps_out}"
 fi
 others=$(printf '%s\n' "$ps_out" | grep -vx "$WORKER_CONTAINER" | grep -c .)
 [ "$others" -gt 0 ] && busy "${others} analysis container(s) still running"
@@ -276,11 +302,35 @@ others=$(printf '%s\n' "$ps_out" | grep -vx "$WORKER_CONTAINER" | grep -c .)
 #    Checking active tasks rather than "have I served one submission yet" is
 #    deliberate: cancel_consumer is asynchronous and messages ack on receipt, so
 #    a worker can be holding two (P3.2).
+#    THE PROBE SHARES A FAILURE MODE WITH WHAT IT PROBES. `inspect` is a broadcast
+#    over the broker, so a worker whose *broker connection* has died cannot answer
+#    it -- and that is indistinguishable, from here, from a worker that is busy.
+#    Observed 2026-08-01 on sivacor-worker-3a052548: fresh connections to Redis
+#    worked (`redis-cli ping` -> NOAUTH), the container was up and `docker exec`
+#    fine, but celery's established socket was half-open, so it answered nothing
+#    and even its own cold shutdown hung. Hence `unreachable` rather than `busy`:
+#    a worker that cannot be reached over the broker also cannot be *given* work,
+#    so sustained unreachability is evidence for reclaiming, not against.
+unreachable() {
+  n=$(( $(cat "$FAILS" 2>/dev/null || echo 0) + 1 ))
+  case "$n" in ''|*[!0-9]*) n=1 ;; esac
+  echo "$n" > "$FAILS"
+  if [ "$n" -ge "$UNREACHABLE_TICKS" ]; then
+    # Safe to act on: we are past the boot grace and have already confirmed there
+    # are no analysis containers, both checked above this point.
+    log "celery unreachable for $n consecutive ticks, no containers -- POWERING OFF ($*)"
+    systemctl poweroff
+    exit 0
+  fi
+  log "UNREACHABLE ($n/$UNREACHABLE_TICKS): $* -- staying up, idle clock preserved"
+  exit 0
+}
+
 if ! active=$(docker exec "$WORKER_CONTAINER" sh -c \
       'celery -A girder_worker.app inspect active --json --timeout 10 -d celery@$(hostname)' 2>&1); then
   # Truncated for the same reason the payload is never logged below: on failure
   # this is celery's error text, but do not bet the journal on that.
-  busy "celery inspect failed: $(printf '%s' "$active" | head -c 200)"
+  unreachable "celery inspect failed: $(printf '%s' "$active" | head -c 200)"
 fi
 #    NEVER LOG $active. The reply is the full task payload, ~1.3 KB including the
 #    submission's `encrypted_secrets` and `wrapped_job_key` -- printing it puts job
@@ -302,10 +352,18 @@ verdict=$(printf '%s' "$active" | jq -r '
         end
     end' 2>/dev/null)
 case "$verdict" in
-  idle)     ;;                                    # fall through to the idle clock
-  noreply)  busy "celery inspect returned no reply" ;;
+  # A real answer: the node is reachable, so forget any earlier failures, and fall
+  # through to the idle clock. Note this clears $FAILS but NOT $STATE -- the clock
+  # must keep accumulating across ticks, that is the whole point of it.
+  idle)     rm -f "$FAILS" ;;
+  # Same class as the inspect failing outright: the node did not answer. It is not
+  # evidence of idleness, and it is not evidence of work either.
+  noreply)  unreachable "celery inspect returned no reply" ;;
+  # The only branch that is positive evidence of work.
   [0-9]*)   busy "active task(s) ${verdict}" ;;
-  *)        busy "could not parse celery reply" ;;
+  # Reachable but unintelligible -- do not count it towards reclaiming, since we
+  # cannot say the node is unreachable, and do not treat it as work either.
+  *)        blocked "could not parse celery reply" ;;
 esac
 
 # 4. Idle long enough? Start the clock on the first idle observation.
@@ -331,7 +389,11 @@ if [ ! -f "$STATE" ]; then
 fi
 since=$(cat "$STATE" 2>/dev/null)
 case "$since" in
-  ''|*[!0-9]*) echo "$now" > "$STATE"; busy "idle clock unreadable, restarting it" ;;
+  # Corrupt state file: drop it so the next tick starts a fresh clock. (The old
+  # code wrote $now here and then had busy() immediately delete it -- same net
+  # effect, but it read as if the clock were being preserved.) Not `busy`: a
+  # damaged file is not evidence of work, and must not clear the failure count.
+  ''|*[!0-9]*) rm -f "$STATE"; blocked "idle clock unreadable, restarting it" ;;
 esac
 idle_for=$(( now - since ))
 if [ "$idle_for" -lt "$IDLE_TIMEOUT_SEC" ]; then
@@ -490,10 +552,18 @@ fix it there, not here.
 Every 2 min sivacor-worker-idle-check asks: past ${BOOT_GRACE_SEC}s uptime, no
 analysis containers, no active celery tasks, idle ${IDLE_TIMEOUT_SEC}s? Then
 'systemctl poweroff', and the controller reaps the SHUTOFF instance. So an
-instance vanishing on you is expected, not a crash. To debug without that:
+instance vanishing on you is expected, not a crash.
+
+It also powers off if celery has been UNREACHABLE for ${UNREACHABLE_TICKS}
+consecutive ticks with no analysis containers -- a worker whose broker connection
+has died cannot be given work, so staying up would strand the VM until the
+controller's 30 h cap. Each tick logs one of BUSY (real work, clock cleared),
+BLOCKED (cannot observe, clock kept), UNREACHABLE (n/N, clock kept) or the idle
+countdown, so the journal says exactly which it was. To debug without any of it:
     sudo systemctl stop sivacor-worker-idle.timer
     sudo /usr/local/bin/sivacor-worker-idle-check   # dry-ish: logs its reasoning
     journalctl -u sivacor-worker-idle -f            # why it stayed up
+    openstack console log show <id>                 # same, with no ssh access
 
 ## 5. On the manager
 Set SIVACOR_MANAGER_QUEUES=local,sivacor.static-01 so it stops taking
