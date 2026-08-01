@@ -354,6 +354,15 @@ After=sivacor-worker.service
 [Service]
 Type=oneshot
 ExecStart=/bin/bash /usr/local/bin/sivacor-worker-idle-check
+# Also to the serial console, so `openstack console log show <id>` answers "why is
+# this worker still up?" with NO access to the box. Learned 2026-08-01: a worker
+# stayed alive after finishing two submissions and the fleet had been launched
+# without a keypair, so the journal -- the only place the reason existed -- was
+# unreachable. Cheap insurance on a fleet whose whole point is being disposable:
+# every line here is one short sentence, at most one per 2 min per VM, and the
+# payload that must never be logged is already reduced to a count upstream.
+StandardOutput=journal+console
+StandardError=journal+console
 EOF
 
 cat > /etc/systemd/system/sivacor-worker-idle.timer <<'EOF'
