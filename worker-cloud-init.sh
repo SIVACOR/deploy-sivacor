@@ -278,14 +278,35 @@ others=$(printf '%s\n' "$ps_out" | grep -vx "$WORKER_CONTAINER" | grep -c .)
 #    a worker can be holding two (P3.2).
 if ! active=$(docker exec "$WORKER_CONTAINER" sh -c \
       'celery -A girder_worker.app inspect active --json --timeout 10 -d celery@$(hostname)' 2>&1); then
-  busy "celery inspect failed: ${active}"
+  # Truncated for the same reason the payload is never logged below: on failure
+  # this is celery's error text, but do not bet the journal on that.
+  busy "celery inspect failed: $(printf '%s' "$active" | head -c 200)"
 fi
-# length > 0 requires the node to have actually replied; an empty object means
-# nobody answered, which is not evidence of idleness.
-if ! printf '%s' "$active" \
-     | jq -e 'to_entries | (length > 0) and all(.[]; .value | length == 0)' >/dev/null 2>&1; then
-  busy "active task(s), or unparseable reply: ${active}"
-fi
+#    NEVER LOG $active. The reply is the full task payload, ~1.3 KB including the
+#    submission's `encrypted_secrets` and `wrapped_job_key` -- printing it puts job
+#    secret material in the journal on every tick of a running submission, routing
+#    around the redaction lib.py applies everywhere else. Reduce to a count and
+#    task names first, then log only that.
+#
+#    Three outcomes, deliberately distinguished: "noreply" (an empty object -- the
+#    node did not answer, which is NOT evidence of idleness), "idle", or a count.
+#    An earlier version collapsed them into one message that read "active task(s),
+#    or unparseable reply" and then dumped the payload, which was both misleading
+#    and the leak above.
+verdict=$(printf '%s' "$active" | jq -r '
+  to_entries as $e
+  | if ($e | length) == 0 then "noreply"
+    else ([$e[].value[]?]) as $t
+      | if ($t | length) == 0 then "idle"
+        else "\($t | length):\([$t[].name | sub(".*\\.";"")] | join(","))"
+        end
+    end' 2>/dev/null)
+case "$verdict" in
+  idle)     ;;                                    # fall through to the idle clock
+  noreply)  busy "celery inspect returned no reply" ;;
+  [0-9]*)   busy "active task(s) ${verdict}" ;;
+  *)        busy "could not parse celery reply" ;;
+esac
 
 # 4. Idle long enough? Start the clock on the first idle observation.
 #
