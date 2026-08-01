@@ -140,10 +140,19 @@ DOCKER_HOST_TMP_ROOT=/home/${DEPLOY_USER}/volumes
 GOSU_USER=${DEPLOY_UID}:${DEPLOY_GID}:${DOCKER_GID}
 HOSTDIR=/
 
-# A path on THIS HOST, not in the container: lib.py:424 passes it as the
-# bind-mount source for the analysis container. Only applied when set, so it is
-# harmless before the license file exists.
-STATA_LICENSE_HOSTPATH=/home/${DEPLOY_USER}/volumes/licenses/stata.lic.19
+# STATA_LICENSE_HOSTPATH is deliberately NOT set here.
+#
+# It used to be, pointing at a file cloud-init never creates -- and because
+# lib.py mounted it for every image, not just Stata, a missing license failed
+# *unrelated* submissions at container create ("bind source path does not
+# exist"). A worker has no license on disk and no way to get one at boot: D7
+# rules out baked images and cloud secret managers, and cloud-init holds no
+# Girder credential (the admin-scoped token only arrives with the task).
+#
+# So leaving this unset is what selects the run-time path: lib.py's
+# stata_license_mount_source() fetches the license from the
+# sivacor.stata_license Girder setting when a Stata image is actually requested.
+# Set it only on a host that really has a license file, i.e. the manager.
 
 # Do NOT add GIRDER_MONGO_URI (worker must not reach Mongo - that is the point
 # of P1) or GIRDER_API_KEY (no longer needed anywhere).
@@ -299,9 +308,12 @@ since tro-utils 0.4.6 nothing outside signing opens a keyring. So a compromised
 worker cannot mint a TRO. If you find yourself creating .gnupg here, something has
 regressed -- preflight check 5 fails on exactly that.
 
-## 3. Stata license (only if this worker runs Stata)
-Copy to /home/${DEPLOY_USER}/volumes/licenses/stata.lic.19 - without it Stata
-exits non-zero and the visible error looks unrelated.
+## 3. Stata license -- nothing to do here
+Fetched at run time from the sivacor.stata_license Girder setting, only when a
+submission actually names a Stata image. Nothing to copy onto this host, and
+STATA_LICENSE_HOSTPATH is deliberately unset. If Stata submissions fail with
+"this deployment has no Stata license", that setting is empty on the SERVER --
+fix it there, not here.
 
 ## 4. Start
     sudo sivacor-worker-preflight

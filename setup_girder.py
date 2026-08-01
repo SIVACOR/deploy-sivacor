@@ -16,6 +16,20 @@ params = {
 headers = {"Content-Type": "application/json", "Accept": "application/json"}
 domain = os.environ.get("domain", "sivacor.org")
 
+# Stata license, seeded into the sivacor.stata_license setting so ephemeral
+# workers can fetch it at run time (plan D7 / item 3b). Git-ignored, like the
+# rest of volumes/; absent is fine and just means no Stata support.
+stata_license_path = os.environ.get(
+    "STATA_LICENSE_HOSTPATH", "volumes/licenses/stata.lic.19"
+)
+try:
+    with open(stata_license_path) as fp:
+        stata_license = fp.read().strip()
+    print(f"--- seeding Stata license from {stata_license_path} ---")
+except OSError:
+    stata_license = ""
+    print(f"--- no Stata license at {stata_license_path}; Stata images disabled ---")
+
 
 def final_msg():
     print("-------------- You should be all set!! -------------")
@@ -95,6 +109,15 @@ settings = [
     {
         "key": "sivacor.tro_gpg_passphrase",
         "value": os.environ.get("GIRDER_SIVACOR_TRO_GPG_PASSPHRASE")
+    },
+    # Served to ephemeral workers at run time, only for Stata images. Read from a
+    # file rather than an env var: a license is multi-line-ish and does not
+    # belong in .env, and this keeps it out of user-data entirely (see the plan's
+    # D7 and item 3b). Empty when the file is absent, which simply means this
+    # deployment cannot run Stata -- and says so at submit-to-container time.
+    {
+        "key": "sivacor.stata_license",
+        "value": stata_license,
     },
 ]
 
