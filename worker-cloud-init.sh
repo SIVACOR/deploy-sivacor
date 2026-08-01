@@ -1,5 +1,5 @@
 #!/bin/bash
-# SIVACOR worker — OpenStack Customization Script (cloud-init user-data).
+# SIVACOR worker — cloud-init user-data, passed by launch-worker.py.
 # Runs once as root on first boot. Log: /var/log/sivacor-provision.log
 # Full rationale: autoscaling_plan.md P1.2. Post-boot steps: ~/NEXT_STEPS.md
 #
@@ -10,9 +10,6 @@
 # Nova's DB, so treat both as permanently disclosed to anyone who ever gets project
 # read access, and rotate on membership change. Reasoning: autoscaling_plan.md P2.2.
 # Left empty -> worker.env gets FILL_ME and the unit stays stopped, as before.
-#
-# KEEP THIS FILE UNDER 16 KB: that is the limit on Horizon's Customization Script
-# field. Put rationale in autoscaling_plan.md and a pointer here.
 #
 # Target: JS2 Ubuntu 24.04 (noble), m3.medium+ (needs the 60 GB root disk).
 # Verified 2026-07-30 on sivacor-test-worker-01: 92s, docker.io 29.1.3 already
@@ -46,6 +43,12 @@ MANAGER_TENANT_IP="${MANAGER_TENANT_IP:-10.3.37.197}"
 declare -p PREPULL_IMAGES >/dev/null 2>&1 || PREPULL_IMAGES=()
 # Empty -> sivacor.<instance-uuid>, unique per VM with no coordination.
 WORKER_QUEUE_OVERRIDE="${WORKER_QUEUE_OVERRIDE:-}"
+# Serve one submission, then stop consuming the shared dispatch queue, so the
+# controller's arithmetic stays `desired == depth` (routing.py, plan P3.2).
+# Defaults on: every VM this script provisions is autoscaled. Set 0 for a
+# hand-made long-lived debug worker. The manager's static worker is configured
+# by docker-stack.yml, not this file, and must never set it.
+EPHEMERAL_WORKER="${EPHEMERAL_WORKER:-1}"
 DEPLOY_USER="ubuntu"; DEPLOY_UID=1000; DEPLOY_GID=1000
 
 # ---- secrets: filled in by the controller; empty = provision manually --------
@@ -132,6 +135,7 @@ GIRDER_NOTIFICATION_REDIS_URL=redis://:${REDIS_PASSWORD:-FILL_ME}@${MANAGER_TENA
 # Discovered at provision time.
 GIRDER_API_URL=https://${GIRDER_HOST}/api/v1
 SIVACOR_WORKER_QUEUE=${WORKER_QUEUE}
+SIVACOR_EPHEMERAL_WORKER=${EPHEMERAL_WORKER}
 DOCKER_HOST_TMP_ROOT=/home/${DEPLOY_USER}/volumes
 GOSU_USER=${DEPLOY_UID}:${DEPLOY_GID}:${DOCKER_GID}
 HOSTDIR=/
