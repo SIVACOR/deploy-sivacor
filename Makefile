@@ -27,9 +27,24 @@ services: dirs
 # host, and a stale value in .env is invisible until analysis containers stop
 # starting. local_worker's `user:` needs it because Swarm has no group_add. Exported
 # after sourcing .env so an explicit value there still wins if a host needs one.
+#
+# SIVACOR_MANAGER_TENANT_IP is the same kind of value and the same kind of hazard,
+# which is why it is discovered the same way. It is the address the autoscaler writes
+# into worker user-data, so a stale one produces workers that boot fine and then fail
+# to reach the broker -- and on the test mirror it changes on every rebuild, which
+# made it a standing per-session edit (10.3.37.91 -> .197 -> ...).
+#
+# `route get` rather than a named interface: the plan's old recipe was
+# `ip -4 addr show dev enp1s0`, and the interface name is not a constant across hosts.
+# On an OpenStack instance the NIC carries the FIXED (tenant) address -- a floating IP
+# is NAT'd by the neutron router and never appears on the interface -- so the source
+# address of any outbound route is exactly the value wanted here, and the floating IP
+# cannot be picked up by accident.
 dev: services
 	. ./.env && export docker_group="$${docker_group:-$$(getent group docker | cut -d: -f3)}" && \
+	  export SIVACOR_MANAGER_TENANT_IP="$${SIVACOR_MANAGER_TENANT_IP:-$$(ip -4 route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++) if($$i=="src") {print $$(i+1); exit}}')}" && \
 	  echo "--- docker group on this host: $${docker_group} ---" && \
+	  echo "--- manager tenant ip: $${SIVACOR_MANAGER_TENANT_IP} ---" && \
 	  docker stack config --compose-file docker-stack.yml | docker stack deploy --compose-file - wt
 	cid=$$(docker ps --filter=name=wt_girder -q);
 	while [ -z $${cid} ] ; do \

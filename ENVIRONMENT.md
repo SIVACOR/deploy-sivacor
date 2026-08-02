@@ -32,7 +32,7 @@ has to contain.
 | `MASTER_KEY_HEX` | See below. |
 | `REDIS_PASSWORD` | See below. **New — an existing `.env` without it will refuse to deploy.** |
 | `OS_CLOUD` | Names an entry in `clouds.yaml`. **Required only because the `autoscaler` service is in the stack** — see *The autoscaler* below. |
-| `SIVACOR_MANAGER_TENANT_IP` | The manager's tenant address (`ip -4 addr show dev enp1s0`), **not** its floating IP. Written into worker user-data. Same caveat. |
+| `SIVACOR_MANAGER_TENANT_IP` | The manager's tenant address, **not** its floating IP — written into worker user-data. **Discovered by the Makefile at deploy time**, like `docker_group`, so you normally do not set it; see below. |
 
 ## Optional
 
@@ -308,6 +308,31 @@ and no locking — `replicas: 1` *is* the mutual exclusion.
 | Job documents | `GIRDER_MONGO_URI`, over the `mongo` overlay. **No Girder API key.** |
 | Worker template | `./worker-cloud-init.sh` bind-mounted read-only. Not baked into the image: it is a deployment artifact that changes far more often than the controller, and two artifacts that must agree is the trap that ruled out a Packer image. |
 | Worker secrets | `MASTER_KEY_HEX` + `REDIS_PASSWORD`, injected into user-data. Must match the manager byte for byte. |
+
+### `SIVACOR_MANAGER_TENANT_IP` is discovered, not configured
+
+`make dev` derives it from `ip -4 route get 1.1.1.1` and prints
+`--- manager tenant ip: ... ---`. An explicit value in `.env` still wins, exactly as
+with `docker_group`.
+
+It is discovered for the same reason: it is a property of *this* host, it changes on
+every test-mirror rebuild, and a stale value fails silently — workers boot fine and
+then cannot reach the broker. Storing it in `.env` made it a standing per-session edit.
+
+`route get` rather than a named interface, because `enp1s0` is not a constant across
+hosts. On an OpenStack instance the NIC carries the **fixed** address; a floating IP is
+NAT'd by the neutron router and never appears on the interface, so the source address
+of an outbound route is exactly the tenant IP and the floating IP cannot be picked up
+by mistake.
+
+The `:?` guard in `docker-stack.yml` stays, so a hand-run `docker stack deploy` that
+bypasses the Makefile still fails loudly instead of deploying a worker template
+pointing at nothing.
+
+**One place still holds a hardcoded copy**: `worker-cloud-init.sh`'s `MANAGER_TENANT_IP`
+in the config block. That is only a fallback for a manual `launch-worker.py` run
+without `--manager-ip`; the autoscaler always injects the discovered value, so the
+stack path no longer depends on it.
 
 ### Two Redis paths, deliberately
 
