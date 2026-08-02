@@ -31,6 +31,8 @@ has to contain.
 | `GIRDER_SIVACOR_TRO_GPG_FINGERPRINT` / `GIRDER_SIVACOR_TRO_GPG_PASSPHRASE` | TRS signing key, for `run_tro("sign")`. |
 | `MASTER_KEY_HEX` | See below. |
 | `REDIS_PASSWORD` | See below. **New — an existing `.env` without it will refuse to deploy.** |
+| `OS_CLOUD` | Names an entry in `clouds.yaml`. **Required only because the `autoscaler` service is in the stack** — see *The autoscaler* below. |
+| `SIVACOR_MANAGER_TENANT_IP` | The manager's tenant address (`ip -4 addr show dev enp1s0`), **not** its floating IP. Written into worker user-data. Same caveat. |
 
 ## Optional
 
@@ -50,6 +52,17 @@ existing `.env` needs none of them.
 | `TRAEFIK_LOG_LEVEL` | `INFO` | Traefik's own default is `ERROR`, which makes certificate problems invisible. Use `DEBUG` to see lego's DNS-01 challenge steps when a cert is not appearing. Passed as a CLI flag because `traefik/config.yml` is a bind mount and is never interpolated. |
 | `DOCS_URL` | `https://docs.sivacor.org/` | Where the apex host redirects. |
 | `FEEDBACK_URL` | the Qualtrics form | Where `feedback.$domain` redirects. |
+| `SIVACOR_AUTOSCALER_IMAGE` | `docker.io/xarthisius/sivacor-autoscaler:latest` | Controller image. **Pin this on production** — see *The autoscaler*. |
+| `OS_CLOUDS_FILE` | `/home/ubuntu/.config/openstack/clouds.yaml` | Host path bind-mounted read-only into the autoscaler. |
+| `SIVACOR_PROVISION_DEADLINE_MINUTES` | unset (**off**) | Reap instances that never announce readiness. Off is the safe default; arming it against a worker image that does not announce deletes every healthy instance. |
+| `SIVACOR_MAX_INSTANCES` | `5` | Fleet cap. Configure **below** the OpenStack quota — the same 25 instances carry the manager, the test mirror and any debug VM. |
+| `SIVACOR_MAX_LIFETIME_HOURS` | `30` | Delete a live instance older than this whatever it claims to be doing. Must stay above the server's `sivacor.max_runtime`. |
+| `SIVACOR_BREAKER_THRESHOLD` | `3` | Stop creating after N consecutive instances fail to register. |
+| `SIVACOR_INTERVAL` | `30` | Seconds between control-loop ticks. |
+| `SIVACOR_OS_KEYPAIR` | unset | SSH key for workers. Keyless is legitimate but undebuggable; the controller warns. A key cannot be added to a running instance. |
+| `SIVACOR_OS_IMAGE` / `SIVACOR_OS_FLAVOR` / `SIVACOR_OS_NETWORK` / `SIVACOR_OS_SECGROUPS` | `Featured-Ubuntu24` / `m3.medium` / `auto_allocated_network` / none | Worker instance shape. **`m3.medium` is a floor, and not for CPU**: JS2 gives 20 GB of root disk to `m3.tiny`/`small`/`quad` and 60 GB to everything above, and analysis images are pulled at run time. Larger flavors buy CPU and RAM, never disk. |
+| `SIVACOR_WORKER_IMAGE` | unset | Overrides `WORKER_IMAGE` in the template. |
+| `SIVACOR_REDIS_URL` | `redis://:$REDIS_PASSWORD@redis:6379/` (set in the stack) | How the **controller** reaches the broker. Distinct from `SIVACOR_MANAGER_TENANT_IP`, which is how **workers** reach it. |
 
 ## Host rules and TLS
 
@@ -267,3 +280,77 @@ shared across every queue a worker consumes, so a separate queue name gives the
 reaper no reserved execution slot. Real isolation would need a separate worker
 process, and at `-c 4` with a 30-minute threshold re-firing every 10 minutes,
 the sweeps do not need one.
+
+
+## The autoscaler
+
+Runs the P3 controller as a stack service instead of a checkout plus a terminal on
+the manager. `replicas: 1`, pinned to the manager node.
+
+**⚠️ It is the highest-privilege service in the stack.** It holds an OpenStack
+application credential and can create *and delete* instances across the whole
+project — including the manager it runs on, and any hand-made debug VM.
+`SIVACOR_MAX_INSTANCES` bounds what it creates; nothing bounds what it can delete
+except the `sivacor-worker` tag it filters on. Treat `clouds.yaml` here the way the
+GPG keyring is treated on `local_worker`.
+
+**Never raise `replicas`.** Two controllers see the same queue depth and the same
+fleet and both act on it: every submission gets two instances, and the allocation
+burns at ~8 SU/hr per surplus VM until somebody notices. There is no leader election
+and no locking — `replicas: 1` *is* the mutual exclusion.
+
+### What it needs, and where each piece comes from
+
+| | |
+|---|---|
+| OpenStack | `clouds.yaml` bind-mounted read-only + `OS_CLOUD`. `OS_*` variables work too — openstacksdk reads either — but a bind mount keeps one more credential out of `.env`. |
+| Broker | `SIVACOR_REDIS_URL`, over the `celery` overlay by service name. |
+| Job documents | `GIRDER_MONGO_URI`, over the `mongo` overlay. **No Girder API key.** |
+| Worker template | `./worker-cloud-init.sh` bind-mounted read-only. Not baked into the image: it is a deployment artifact that changes far more often than the controller, and two artifacts that must agree is the trap that ruled out a Packer image. |
+| Worker secrets | `MASTER_KEY_HEX` + `REDIS_PASSWORD`, injected into user-data. Must match the manager byte for byte. |
+
+### Two Redis paths, deliberately
+
+`SIVACOR_REDIS_URL` is how the *controller* reaches the broker; the stack points it at
+the `redis` service name on the overlay. `SIVACOR_MANAGER_TENANT_IP` is what gets
+written into *worker* user-data, and a worker is off-box, so it must be the manager's
+tenant address — never `redis`, never the floating IP.
+
+Keeping them separate is what lets the autoscaler run on **production without
+publishing Redis 6379**, which the P0 rollout deliberately does not do yet.
+
+### Why the database and not the REST API
+
+Two reasons, and the second is the one that bit:
+
+1. **No credential to bootstrap.** An admin API key cannot exist until after Girder
+   has been started once, so a fresh deployment could not bring the stack up in a
+   single pass.
+2. **No endpoint semantics to get wrong.** `GET /job` defaults `userId` to the
+   authenticated caller and submissions belong to the researchers who made them, so
+   it returned `200` and an empty list on every tick — silently, for the controller's
+   entire life. A query has no hidden scoping.
+
+This does **not** contradict the rule that housekeeping sweeps must stay HTTP calls.
+That rule is about *writes*: failing a submission has to fire
+`jobs.job.update.after`, which is bound only in the Girder server process. The
+autoscaler only reads.
+
+### Pin the image before merging to main
+
+CI pushes `latest` from `main`, and `docker-stack.yml` defaults to `latest` — so
+merging would change what production runs without anyone deploying. The workflow also
+pushes an immutable `sha-<short>` tag for exactly this reason:
+
+```sh
+docker service inspect --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' wt_autoscaler
+# -> export SIVACOR_AUTOSCALER_IMAGE=docker.io/xarthisius/sivacor-autoscaler@sha256:...
+```
+
+### Logs are secret-bearing until proven otherwise
+
+`-v` raises only this package's logger, and the library loggers are pinned at INFO so
+request bodies can no longer be logged — a Nova `POST /servers` body is base64, not
+encryption, and one decode yields `MASTER_KEY_HEX` and `REDIS_PASSWORD` in cleartext.
+That happened once. The container's default is quiet; add `-v` to the service's
+`command:` when debugging, and check the output before pasting it anywhere.
