@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import json
+import json  # noqa: I001
 import requests
 import time
 import os
@@ -14,7 +14,11 @@ params = {
     "admin": True,
 }
 headers = {"Content-Type": "application/json", "Accept": "application/json"}
-domain = os.environ.get("domain", "sivacor.org")
+domain = os.environ.get("domain")
+if not domain:
+    raise RuntimeError(
+        "domain environment variable is not set; cannot configure Girder"
+    )
 
 # Stata license, seeded into the sivacor.stata_license setting so ephemeral
 # workers can fetch it at run time (plan D7 / item 3b). Git-ignored, like the
@@ -34,8 +38,8 @@ except OSError:
 def final_msg():
     print("-------------- You should be all set!! -------------")
     print(f"try going to https://girder.{domain} and log in with: ")
-    print("  user : %s" % params["login"])
-    print("  pass : %s" % params["password"])
+    print(f"  user : {params['login']}")
+    print(f"  pass : {params['password']}")
 
 
 api_url = f"https://girder.{domain}/api/v1"
@@ -104,11 +108,11 @@ settings = [
     {"key": "oauth.providers_enabled", "value": ["globus"]},
     {
         "key": "sivacor.tro_gpg_fingerprint",
-        "value": os.environ.get("GIRDER_SIVACOR_TRO_GPG_FINGERPRINT")
+        "value": os.environ.get("GIRDER_SIVACOR_TRO_GPG_FINGERPRINT"),
     },
     {
         "key": "sivacor.tro_gpg_passphrase",
-        "value": os.environ.get("GIRDER_SIVACOR_TRO_GPG_PASSPHRASE")
+        "value": os.environ.get("GIRDER_SIVACOR_TRO_GPG_PASSPHRASE"),
     },
     # Served to ephemeral workers at run time, only for Stata images. Read from a
     # file rather than an env var: a license is multi-line-ish and does not

@@ -20,6 +20,7 @@ dirs: $(SUBDIRS)
 
 $(SUBDIRS):
 	@sudo mkdir -p $@
+	@sudo chown -R $$(id -u):$$(id -g) $@
 
 services: dirs
 

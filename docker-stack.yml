@@ -45,6 +45,7 @@ services:
           - "node.role == manager"
     environment:
       - CF_DNS_API_TOKEN=${CF_DNS_API_TOKEN}
+      - CF_ZONE_API_TOKEN=${CF_DNS_API_TOKEN}
     command:
       - "--accesslog=true"
       - "--accesslog.format=json"
@@ -252,7 +253,7 @@ services:
     # sivacor:               shared dispatch queue new submissions land on.
     # sivacor.static-01:     this worker's private queue; a submission's chain
     #                        is pinned here after its first step.
-    entrypoint: ["/usr/bin/tini", "--", "celery", "--app=girder_worker.app", "worker", "--queues=${SIVACOR_MANAGER_QUEUES:-local,sivacor,sivacor.static-01}", "-c", "4", "--loglevel=INFO"]
+    entrypoint: ["/usr/bin/tini", "--", "celery", "--app=girder_worker.app", "worker", "--queues=${SIVACOR_MANAGER_QUEUES:-local,sivacor.static-01}", "-c", "4", "--loglevel=INFO"]
     deploy:
       # Must stay at 1: two replicas would share one private queue name, and a
       # pinned step could land on the replica that lacks the workspace
