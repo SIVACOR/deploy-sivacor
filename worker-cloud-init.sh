@@ -19,6 +19,17 @@ set -euo pipefail
 exec > >(tee -a /var/log/sivacor-provision.log) 2>&1
 echo "=== provisioning started $(date -Is) ==="
 
+# Say so loudly, on the serial console, if any of this fails. Under `set -e` an
+# abort is otherwise near-silent: cloud-init logs one generic `Failed to run module
+# scripts_user` and the instance sits ACTIVE with no celery and -- because the
+# systemd units below were never written -- no self-shutdown supervisor either.
+# On 2026-08-02 that cost a VM for a whole run and stalled a submission behind it,
+# and answering "did this provision?" meant reading 100 kB of console log for an
+# absence. `openstack console log show <id> | grep SIVACOR-PROVISION` now answers it.
+# This is diagnosis only: the controller decides with the readiness marker the
+# worker publishes once celery is actually up (plan D9), not with this line.
+trap 'rc=$?; echo "=== SIVACOR-PROVISION FAILED (exit $rc) at line $LINENO: ${BASH_COMMAND} ==="; exit $rc' ERR
+
 # ---- config: review these before launching -------------------------------
 # Convention: the tag tracks the branch name, so worker and manager are provably
 # the same build. NOTHING BUILDS THIS AUTOMATICALLY -- .github/workflows/docker.yml
