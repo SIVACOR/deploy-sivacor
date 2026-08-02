@@ -31,8 +31,6 @@ has to contain.
 | `GIRDER_SIVACOR_TRO_GPG_FINGERPRINT` / `GIRDER_SIVACOR_TRO_GPG_PASSPHRASE` | TRS signing key, for `run_tro("sign")`. |
 | `MASTER_KEY_HEX` | See below. |
 | `REDIS_PASSWORD` | See below. **New — an existing `.env` without it will refuse to deploy.** |
-| `OS_CLOUD` | Names an entry in `clouds.yaml`. **Required only because the `autoscaler` service is in the stack** — see *The autoscaler* below. |
-| `SIVACOR_MANAGER_TENANT_IP` | The manager's tenant address, **not** its floating IP — written into worker user-data. **Discovered by the Makefile at deploy time**, like `docker_group`, so you normally do not set it; see below. |
 
 ## Optional
 
@@ -52,6 +50,9 @@ existing `.env` needs none of them.
 | `TRAEFIK_LOG_LEVEL` | `INFO` | Traefik's own default is `ERROR`, which makes certificate problems invisible. Use `DEBUG` to see lego's DNS-01 challenge steps when a cert is not appearing. Passed as a CLI flag because `traefik/config.yml` is a bind mount and is never interpolated. |
 | `DOCS_URL` | `https://docs.sivacor.org/` | Where the apex host redirects. |
 | `FEEDBACK_URL` | the Qualtrics form | Where `feedback.$domain` redirects. |
+| `SIVACOR_AUTOSCALING` | unset (**off**) | Any non-empty value makes `make dev` merge `docker-stack.autoscaler.yml` and run the fleet controller. Off, the stack needs no OpenStack credentials at all. |
+| `OS_CLOUD` | — | Entry in `clouds.yaml`. **Required when `SIVACOR_AUTOSCALING` is set**, unused otherwise. |
+| `SIVACOR_MANAGER_TENANT_IP` | discovered | Manager's tenant address, **not** its floating IP — written into worker user-data. The Makefile derives it like `docker_group`; an explicit value wins. Only consulted with `SIVACOR_AUTOSCALING`. |
 | `SIVACOR_AUTOSCALER_IMAGE` | `docker.io/xarthisius/sivacor-autoscaler:latest` | Controller image. **Pin this on production** — see *The autoscaler*. |
 | `OS_CLOUDS_FILE` | `/home/ubuntu/.config/openstack/clouds.yaml` | Host path bind-mounted read-only into the autoscaler. |
 | `SIVACOR_PROVISION_DEADLINE_MINUTES` | unset (**off**) | Reap instances that never announce readiness. Off is the safe default; arming it against a worker image that does not announce deletes every healthy instance. |
@@ -286,6 +287,34 @@ the sweeps do not need one.
 
 Runs the P3 controller as a stack service instead of a checkout plus a terminal on
 the manager. `replicas: 1`, pinned to the manager node.
+
+### Opt in with `SIVACOR_AUTOSCALING`
+
+It lives in **`docker-stack.autoscaler.yml`**, a separate overlay merged on top of the
+base stack, and `make dev` includes it only when `SIVACOR_AUTOSCALING` is set:
+
+```sh
+export SIVACOR_AUTOSCALING=1     # in .env
+```
+
+`make dev` prints which mode it is in — `--- autoscaling: ON ---` or `--- autoscaling:
+off ---` — so the state is readable from the deploy rather than inferred.
+
+**Why a separate file rather than a flag on the service.** `docker stack config`
+interpolates the *whole* input before deploying anything, so the `OS_CLOUD:?` guard
+would fail the **entire stack** when unset, not just that one service. Inline, the
+stack could not be brought up at all without OpenStack credentials — which breaks
+non-fleet deployments, and breaks the production rollout, where the stack deliberately
+comes up **before** a fleet exists. Splitting also means unsetting the flag genuinely
+removes `wt_autoscaler`, because `docker stack deploy` deletes services absent from the
+merged file.
+
+**Without the flag, the base stack needs no OpenStack anything** — no `clouds.yaml`, no
+`OS_CLOUD`, no `SIVACOR_MANAGER_TENANT_IP`. Its only required variables are
+`docker_group` and `REDIS_PASSWORD`.
+
+For purely local development, `deploy-dev/` remains the right stack and is untouched by
+any of this.
 
 **⚠️ It is the highest-privilege service in the stack.** It holds an OpenStack
 application credential and can create *and delete* instances across the whole

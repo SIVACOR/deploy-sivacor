@@ -1,0 +1,128 @@
+# Autoscaling overlay -- merged on top of docker-stack.yml, never deployed alone.
+#
+#   docker stack config --compose-file docker-stack.yml \
+#                       --compose-file docker-stack.autoscaler.yml | docker stack deploy ...
+#
+# `make dev` adds the second file only when SIVACOR_AUTOSCALING is set in .env.
+#
+# WHY THIS IS A SEPARATE FILE, and it is not tidiness. `docker stack config`
+# interpolates the WHOLE input before deploying anything, so the `OS_CLOUD:?` guard
+# below would fail the *entire stack* when it is unset -- not just this service. With
+# the autoscaler inline, `deploy-sivacor` could not be brought up at all without
+# OpenStack credentials, which breaks two things that matter:
+#
+#   * local and non-fleet deployments, which have no clouds.yaml and want none;
+#   * the production rollout itself, which deliberately brings the stack up BEFORE a
+#     fleet exists (see the plan's "Deploying P0" step 0). Inline, production would
+#     need OpenStack credentials on day one AND would immediately start booting VMs
+#     for any queued submission -- exactly the thing that rollout defers.
+#
+# Splitting also makes the state visible: whether autoscaling is on is readable from
+# the deploy command, and removing the flag genuinely tears `wt_autoscaler` down,
+# because `docker stack deploy` removes services absent from the merged file.
+#
+# The `celery` and `mongo` networks are defined in docker-stack.yml; this file relies
+# on the merge and must not redeclare them.
+
+services:
+  # On-demand OpenStack worker instances (plan P3). Previously run by hand from a
+  # checkout on the manager; this is the same controller as a stack service.
+  #
+  # ⚠️ THE HIGHEST-PRIVILEGE SERVICE IN THIS STACK. It holds an OpenStack
+  # application credential and can create and delete instances across the whole
+  # project -- including the manager it runs on, and any hand-made debug VM.
+  # `SIVACOR_MAX_INSTANCES` bounds what it will create; nothing bounds what it can
+  # delete except the tags it filters on. Treat clouds.yaml here the way the GPG
+  # keyring is treated on `local_worker`.
+  autoscaler:
+    # Pin this in .env before merging the autoscaler to main. CI pushes `latest`
+    # from main, and a default of `:latest` would make the merge itself change what
+    # production runs -- the P0.3 failure, which this stack already carries once for
+    # girder-sivacor. `sha-<short>` tags exist precisely so a deployment can pin.
+    image: ${SIVACOR_AUTOSCALER_IMAGE:-docker.io/xarthisius/sivacor-autoscaler:latest}
+    networks:
+      # Redis for queue depth and readiness markers, Mongo for the job documents.
+      # Nothing else: it makes no HTTP calls and is not behind traefik.
+      - celery
+      - mongo
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      # The template is deploy-sivacor's file, not the autoscaler's, and it changes
+      # far more often than the controller code -- MANAGER_TENANT_IP alone is a
+      # per-rebuild edit. Baking it into the image would create two artifacts that
+      # must agree, which is the argument P2.1 used to reject a Packer image.
+      - ./worker-cloud-init.sh:/etc/sivacor/worker-cloud-init.sh:ro
+      # The only way this process can reach OpenStack. Read-only, and the file stays
+      # owned by the host user. `OS_*` environment variables work too -- openstacksdk
+      # reads either -- but a bind mount keeps one more credential out of .env.
+      - ${OS_CLOUDS_FILE:-/home/ubuntu/.config/openstack/clouds.yaml}:/home/autoscaler/.config/openstack/clouds.yaml:ro
+    environment:
+      - OS_CLOUD=${OS_CLOUD:?OS_CLOUD must be set, naming an entry in clouds.yaml}
+      - SIVACOR_WORKER_TEMPLATE=/etc/sivacor/worker-cloud-init.sh
+      # Two different Redis paths, deliberately. This service reaches the broker over
+      # the overlay network by service name, so it does NOT depend on 6379 being
+      # published -- which is what lets production run the autoscaler while keeping
+      # P0 step 0's "do not publish Redis on production yet".
+      - SIVACOR_REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/
+      # ...whereas this is what gets written into worker user-data, and a worker is
+      # off-box: it must be the manager's TENANT address, never `redis` and never the
+      # floating IP. Changes on every test-mirror rebuild.
+      - SIVACOR_MANAGER_TENANT_IP=${SIVACOR_MANAGER_TENANT_IP:?SIVACOR_MANAGER_TENANT_IP must be set, the manager tenant address, not its floating ip}
+      # Secrets injected into worker user-data (P2.2). Both must match the manager
+      # byte for byte or workers cannot decrypt job secrets / reach the broker.
+      - MASTER_KEY_HEX=${MASTER_KEY_HEX:?MASTER_KEY_HEX must be set}
+      - REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD must be set}
+      # Job documents come from Girder's database, not its REST API. No API key to
+      # bootstrap (one cannot exist before Girder's first start, so the REST version
+      # could not bring a fresh stack up in one pass), and no endpoint scoping to get
+      # wrong -- `GET /job` silently filters to the calling user, which returned `[]`
+      # on every tick for the controller's whole life. Reads only, so P0.5's
+      # "housekeeping must stay HTTP" rule does not apply: that is about writes needing
+      # `jobs.job.update.after`, which is bound only in the Girder server process.
+      - GIRDER_MONGO_URI=mongodb://mongo:27017/girder
+      # NOT for this process -- this is the public hostname written into worker
+      # user-data, because a worker VM does reach Girder over HTTPS.
+      - SIVACOR_GIRDER_HOST=girder.${domain}
+      - SIVACOR_WORKER_IMAGE=${SIVACOR_WORKER_IMAGE:-}
+      - SIVACOR_DISPATCH_QUEUE=${SIVACOR_DISPATCH_QUEUE:-sivacor}
+      # Guardrails (D3): cap BELOW the OpenStack quota, since the same 25 instances
+      # carry the manager, the test mirror and any hand-made debug VM.
+      - SIVACOR_MAX_INSTANCES=${SIVACOR_MAX_INSTANCES:-5}
+      - SIVACOR_MAX_LIFETIME_HOURS=${SIVACOR_MAX_LIFETIME_HOURS:-30}
+      - SIVACOR_BREAKER_THRESHOLD=${SIVACOR_BREAKER_THRESHOLD:-3}
+      - SIVACOR_INTERVAL=${SIVACOR_INTERVAL:-30}
+      # D9. Unset = off, which is the safe default: arming this against a worker
+      # image that does not write readiness markers deletes every healthy instance
+      # once it passes the deadline. Set it only after confirming
+      # `redis-cli KEYS 'sivacor:ready:*'` lists a live worker.
+      - SIVACOR_PROVISION_DEADLINE_MINUTES=${SIVACOR_PROVISION_DEADLINE_MINUTES:-}
+      # A keyless fleet is a legitimate posture but a terrible debugging one; the
+      # controller warns at startup when this is empty. A key cannot be added later.
+      - SIVACOR_OS_KEYPAIR=${SIVACOR_OS_KEYPAIR:-}
+      - SIVACOR_OS_IMAGE=${SIVACOR_OS_IMAGE:-Featured-Ubuntu24}
+      # m3.medium is the floor, and not for CPU: JS2 gives 20 GB of root disk to
+      # m3.tiny/small/quad and 60 GB to everything above, and analysis images land
+      # at run time (D4/D6). Larger flavors buy CPU and RAM, never disk.
+      - SIVACOR_OS_FLAVOR=${SIVACOR_OS_FLAVOR:-m3.medium}
+      - SIVACOR_OS_NETWORK=${SIVACOR_OS_NETWORK:-auto_allocated_network}
+      - SIVACOR_OS_SECGROUPS=${SIVACOR_OS_SECGROUPS:-}
+    # No extra_hosts: this process makes no HTTP call to Girder, so the floating-IP
+    # hairpin problem (P1.3 finding 5) that every other service works around simply
+    # does not arise here.
+    deploy:
+      # ⚠️ NEVER raise this. Two controllers see the same queue depth and the same
+      # fleet, and both act on it: every submission gets two instances, and the
+      # allocation burns at 8 SU/hr per surplus VM until someone notices. There is no
+      # leader election and no locking -- `replicas: 1` IS the mutual exclusion.
+      replicas: 1
+      labels:
+        - "traefik.enable=false"
+      placement:
+        constraints:
+          # Bind-mounts the template and clouds.yaml from this node, and reaches
+          # Redis as a peer of the stack. Same reasoning as the other pinned
+          # services (P0.4).
+          - "node.role == manager"
+      restart_policy:
+        condition: any
+        delay: 30s

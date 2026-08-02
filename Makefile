@@ -44,9 +44,16 @@ services: dirs
 dev: services
 	. ./.env && export docker_group="$${docker_group:-$$(getent group docker | cut -d: -f3)}" && \
 	  export SIVACOR_MANAGER_TENANT_IP="$${SIVACOR_MANAGER_TENANT_IP:-$$(ip -4 route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++) if($$i=="src") {print $$(i+1); exit}}')}" && \
+	  autoscaler=""; \
+	  if [ -n "$${SIVACOR_AUTOSCALING:-}" ]; then \
+	    autoscaler="--compose-file docker-stack.autoscaler.yml"; \
+	    echo "--- autoscaling: ON (fleet instances will be created and deleted) ---"; \
+	  else \
+	    echo "--- autoscaling: off (set SIVACOR_AUTOSCALING=1 in .env to enable) ---"; \
+	  fi; \
 	  echo "--- docker group on this host: $${docker_group} ---" && \
 	  echo "--- manager tenant ip: $${SIVACOR_MANAGER_TENANT_IP} ---" && \
-	  docker stack config --compose-file docker-stack.yml | docker stack deploy --compose-file - wt
+	  docker stack config --compose-file docker-stack.yml $${autoscaler} | docker stack deploy --compose-file - wt
 	cid=$$(docker ps --filter=name=wt_girder -q);
 	while [ -z $${cid} ] ; do \
 		  echo $${cid} ; \
