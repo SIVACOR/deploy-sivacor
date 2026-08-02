@@ -78,10 +78,20 @@ REDIS_PASSWORD="${REDIS_PASSWORD:-}"
 
 # ---- packages ------------------------------------------------------------
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -q
+# Wait for the dpkg lock rather than failing on it. `unattended-upgrades` starts
+# automatically on a fresh Ubuntu boot and routinely still holds the lock when
+# cloud-init reaches this point, which is a race we lose roughly one boot in
+# three. It cost a whole VM on 2026-08-02 (run 6): apt exited non-zero here,
+# cloud-init reported `Failed to run module scripts_user`, and because this step
+# precedes the systemd units, the instance came up with no celery AND no
+# self-shutdown supervisor -- so it could neither work nor reclaim itself, and
+# sat ACTIVE absorbing a submission's worth of controller capacity until the 30 h
+# max-lifetime sweep. `DPkg::Lock::Timeout` (apt >= 2.0) makes apt block instead.
+APT_LOCK_WAIT="-o DPkg::Lock::Timeout=600"
+apt-get $APT_LOCK_WAIT update -q
 # No gnupg: since tro-utils 0.4.6 the keyring is only touched when signing, and
 # signing runs on the manager. A worker needs no key material and no gpg binary.
-apt-get install -y -q docker.io redis-tools ca-certificates curl jq
+apt-get $APT_LOCK_WAIT install -y -q docker.io redis-tools ca-certificates curl jq
 systemctl enable --now docker
 
 # ---- docker GID: differs per VM, so discover rather than hardcode ---------
