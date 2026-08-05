@@ -41,13 +41,24 @@ services: dirs
 # is NAT'd by the neutron router and never appears on the interface -- so the source
 # address of any outbound route is exactly the value wanted here, and the floating IP
 # cannot be picked up by accident.
+#
+# SIVACOR_DEPLOYMENT defaults to `domain` for the same reason those two are derived:
+# it is a property of this deployment, and the failure it prevents is silent. It is the
+# tag the autoscaler puts on the instances it owns and requires of the ones it will
+# delete, so production and the test mirror -- one OpenStack project, D3 -- stop seeing
+# each other's workers as capacity to count and SHUTOFFs to reap. Derived rather than
+# defaulted inside the compose file because compose interpolation does not nest
+# (`${A:-${B}}` is not portable), and set here rather than left to `.env` so a host that
+# forgets the line still gets a distinct namespace instead of a shared one.
 dev: services
 	. ./.env && export docker_group="$${docker_group:-$$(getent group docker | cut -d: -f3)}" && \
 	  export SIVACOR_MANAGER_TENANT_IP="$${SIVACOR_MANAGER_TENANT_IP:-$$(ip -4 route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++) if($$i=="src") {print $$(i+1); exit}}')}" && \
+	  export SIVACOR_DEPLOYMENT="$${SIVACOR_DEPLOYMENT:-$${domain}}" && \
 	  autoscaler=""; \
 	  if [ -n "$${SIVACOR_AUTOSCALING:-}" ]; then \
 	    autoscaler="--compose-file docker-stack.autoscaler.yml"; \
 	    echo "--- autoscaling: ON (fleet instances will be created and deleted) ---"; \
+	    echo "--- fleet owned by: sivacor-deployment:$${SIVACOR_DEPLOYMENT} ---"; \
 	  else \
 	    echo "--- autoscaling: off (set SIVACOR_AUTOSCALING=1 in .env to enable) ---"; \
 	  fi; \

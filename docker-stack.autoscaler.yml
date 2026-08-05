@@ -58,6 +58,14 @@ services:
       - ${OS_CLOUDS_FILE:-/home/ubuntu/.config/openstack/clouds.yaml}:/home/autoscaler/.config/openstack/clouds.yaml:ro
     environment:
       - OS_CLOUD=${OS_CLOUD:?OS_CLOUD must be set, naming an entry in clouds.yaml}
+      # Which instances this controller owns. It tags every instance it creates with
+      # `sivacor-deployment:<this>` and REQUIRES that tag on any instance it counts or
+      # deletes, because production and the test mirror share one OpenStack project
+      # (D3). Without it each controller sees the other's workers as available capacity
+      # -- their claim markers live in the other deployment's Girder -- so a queued
+      # submission gets no VM, and each reaps the other's SHUTOFFs. The Makefile
+      # defaults it to `domain`; guard message has no hyphen on purpose (P5.0 trap).
+      - SIVACOR_DEPLOYMENT=${SIVACOR_DEPLOYMENT:?SIVACOR_DEPLOYMENT must be set, normally the deployment domain}
       - SIVACOR_WORKER_TEMPLATE=/etc/sivacor/worker-cloud-init.sh
       # Two different Redis paths, deliberately. This service reaches the broker over
       # the overlay network by service name, so it does NOT depend on 6379 being
