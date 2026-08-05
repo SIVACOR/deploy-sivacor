@@ -221,11 +221,8 @@ services:
       - HOSTDIR=/
       - GIRDER_SIVACOR_TRO_GPG_PASSPHRASE=${GIRDER_SIVACOR_TRO_GPG_PASSPHRASE}
       - GIRDER_SIVACOR_TRO_GPG_FINGERPRINT=${GIRDER_SIVACOR_TRO_GPG_FINGERPRINT}
-      # P0.8: the /home/ubuntu/deploy-dev default is a deploy-dev path inside
-      # the production stack and is still unverified on the prod host. Kept as
-      # the default so production behaviour is unchanged; override per host.
-      - STATA_LICENSE_HOSTPATH=${STATA_LICENSE_HOSTPATH:-/home/ubuntu/deploy-dev/volumes/licenses/stata.lic.19}
-      - DOCKER_HOST_TMP_ROOT=${DOCKER_HOST_TMP_ROOT:-/home/ubuntu/deploy-dev/volumes}
+      - STATA_LICENSE_HOSTPATH=${STATA_LICENSE_HOSTPATH:-/home/ubuntu/deploy-sivacor/volumes/licenses/stata.lic.19}
+      - DOCKER_HOST_TMP_ROOT=${DOCKER_HOST_TMP_ROOT:-/home/ubuntu/deploy-sivacor/volumes}
       - MASTER_KEY_HEX=${MASTER_KEY_HEX}
       # A stable, explicit private-queue name. Left unset, routing.py derives it
       # from the celery node name, which under Swarm is a task ID that changes
@@ -309,7 +306,7 @@ services:
       # os.environ.get() truthiness check. Leave it unset to send for real.
       - GIRDER_EMAIL_TO_CONSOLE=${GIRDER_EMAIL_TO_CONSOLE:-}
       - GIRDER_SETTING_USER_QUOTA_DEFAULT_USER_QUOTA=10000000000
-      - DOCKER_HOST_TMP_ROOT=${DOCKER_HOST_TMP_ROOT:-/home/ubuntu/deploy-dev/volumes}
+      - DOCKER_HOST_TMP_ROOT=${DOCKER_HOST_TMP_ROOT:-/home/ubuntu/deploy-sivacor/volumes}
       # Must match the workers': the server encrypts job secrets, the worker
       # decrypts them. Both sides currently fall back to the same hardcoded
       # dummy key, so they agree only by accident.
