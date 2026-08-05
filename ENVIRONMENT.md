@@ -63,7 +63,7 @@ existing `.env` needs none of them.
 | `SIVACOR_INTERVAL` | `30` | Seconds between control-loop ticks. |
 | `SIVACOR_OS_KEYPAIR` | unset | SSH key for workers. Keyless is legitimate but undebuggable; the controller warns. A key cannot be added to a running instance. |
 | `SIVACOR_OS_IMAGE` / `SIVACOR_OS_FLAVOR` / `SIVACOR_OS_NETWORK` / `SIVACOR_OS_SECGROUPS` | `Featured-Ubuntu24` / `m3.medium` / `auto_allocated_network` / none | Worker instance shape. **`m3.medium` is a floor, and not for CPU**: JS2 gives 20 GB of root disk to `m3.tiny`/`small`/`quad` and 60 GB to everything above, and analysis images are pulled at run time. Larger flavors buy CPU and RAM, never disk. |
-| `SIVACOR_WORKER_IMAGE` | unset | Overrides `WORKER_IMAGE` in the template. |
+| `SIVACOR_WORKER_IMAGE` | **derived from `GIRDER_SIVACOR_IMAGE`** | The image worker VMs boot, injected into user-data. **Do not set it in `.env`.** It is the *same* image as the manager's — one `girder-sivacor` build serves `girder`, `beat`, `local_worker` and every VM — so the Makefile derives it, and two independently-set variables holding one value would just be a way to get manager/worker version skew silently. Set it only to test a new worker image against the current manager, and remember to remove it. |
 | `SIVACOR_REDIS_URL` | `redis://:$REDIS_PASSWORD@redis:6379/` (set in the stack) | How the **controller** reaches the broker. Distinct from `SIVACOR_MANAGER_TENANT_IP`, which is how **workers** reach it. |
 
 ## Host rules and TLS

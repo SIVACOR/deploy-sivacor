@@ -42,6 +42,21 @@ services: dirs
 # address of any outbound route is exactly the value wanted here, and the floating IP
 # cannot be picked up by accident.
 #
+# SIVACOR_WORKER_IMAGE is derived from GIRDER_SIVACOR_IMAGE because they are the SAME
+# image: one girder-sivacor build serves girder, beat, local_worker and every worker VM.
+# Two independently-settable variables holding one value is a drift generator -- update
+# the pin for the manager, forget the fleet, and you get manager/worker version skew,
+# silently, which is the P0.3 plugin/stack failure with a different pair of nouns. An
+# explicit value still wins, for the one legitimate case: deliberately testing a new
+# worker image against the current manager.
+#
+# The nested fallback repeats docker-stack.yml's own default rather than resolving to
+# empty. Empty is not neutral here -- the autoscaler skips the injection when the value
+# is blank (`if worker_image:`), so the VM falls through to worker-cloud-init.sh's
+# built-in default, and an unpinned deployment would quietly run a DIFFERENT image on
+# its workers than on its manager. Shell `:-` nests; compose interpolation does not,
+# which is why this cannot live in the compose file.
+#
 # SIVACOR_DEPLOYMENT defaults to `domain` for the same reason those two are derived:
 # it is a property of this deployment, and the failure it prevents is silent. It is the
 # tag the autoscaler puts on the instances it owns and requires of the ones it will
@@ -54,11 +69,13 @@ dev: services
 	. ./.env && export docker_group="$${docker_group:-$$(getent group docker | cut -d: -f3)}" && \
 	  export SIVACOR_MANAGER_TENANT_IP="$${SIVACOR_MANAGER_TENANT_IP:-$$(ip -4 route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++) if($$i=="src") {print $$(i+1); exit}}')}" && \
 	  export SIVACOR_DEPLOYMENT="$${SIVACOR_DEPLOYMENT:-$${domain}}" && \
+	  export SIVACOR_WORKER_IMAGE="$${SIVACOR_WORKER_IMAGE:-$${GIRDER_SIVACOR_IMAGE:-docker.io/xarthisius/girder-sivacor:latest}}" && \
 	  autoscaler=""; \
 	  if [ -n "$${SIVACOR_AUTOSCALING:-}" ]; then \
 	    autoscaler="--compose-file docker-stack.autoscaler.yml"; \
 	    echo "--- autoscaling: ON (fleet instances will be created and deleted) ---"; \
 	    echo "--- fleet owned by: sivacor-deployment:$${SIVACOR_DEPLOYMENT} ---"; \
+	    echo "--- worker image: $${SIVACOR_WORKER_IMAGE} ---"; \
 	  else \
 	    echo "--- autoscaling: off (set SIVACOR_AUTOSCALING=1 in .env to enable) ---"; \
 	  fi; \

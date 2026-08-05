@@ -31,17 +31,24 @@ echo "=== provisioning started $(date -Is) ==="
 trap 'rc=$?; echo "=== SIVACOR-PROVISION FAILED (exit $rc) at line $LINENO: ${BASH_COMMAND} ==="; exit $rc' ERR
 
 # ---- config: review these before launching -------------------------------
-# Convention: the tag tracks the branch name, so worker and manager are provably
-# the same build. NOTHING BUILDS THIS AUTOMATICALLY -- .github/workflows/docker.yml
-# only pushes `latest`, and only from `main`. Build and push this tag by hand after
-# any change to girder-sivacor, or a fresh VM boots stale code. When `distributed`
-# merges to main, this becomes `latest`.
+# WORKER_IMAGE is normally INJECTED and this default should never be reached from a
+# `make dev` deployment: the Makefile derives SIVACOR_WORKER_IMAGE from
+# GIRDER_SIVACOR_IMAGE, so the worker and the manager are the same digest by
+# construction rather than by anyone remembering. It stays here for a hand-pasted run.
+#
+# It used to be `:distributed`, on the convention that the tag tracked the branch so
+# worker and manager were provably the same build. That convention died when the branch
+# merged: docker.yml pushes only `latest`, only from `main`, so nothing would ever
+# rebuild `:distributed` again -- it froze at a hand-push of 2026-08-02 while the manager
+# moved on, and a fresh VM would have booted increasingly stale code with no signal at
+# all. `latest` is the honest last resort; a digest from the Makefile is the real answer.
+#
 # launch-worker.py replaces the marker line below with assignments. Everything in
 # this block therefore uses ${VAR:-default}, so an injected value wins and a
 # hand-pasted run still works. Keep the marker on its own line, spelled exactly.
 #__SIVACOR_INJECT__
 
-WORKER_IMAGE="${WORKER_IMAGE:-docker.io/xarthisius/girder-sivacor:distributed}"
+WORKER_IMAGE="${WORKER_IMAGE:-docker.io/xarthisius/girder-sivacor:latest}"
 GIRDER_HOST="${GIRDER_HOST:-girder.test.sivacor.org}"
 # Manager's TENANT ip, not its floating ip: OpenStack does not hairpin floating
 # ips, and this keeps multi-GB uploads off the NAT. TLS still verifies (the cert
