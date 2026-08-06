@@ -96,7 +96,13 @@ services:
       # Guardrails (D3): cap BELOW the OpenStack quota, since the same 25 instances
       # carry the manager, the test mirror and any hand-made debug VM.
       - SIVACOR_MAX_INSTANCES=${SIVACOR_MAX_INSTANCES:-5}
-      - SIVACOR_MAX_LIFETIME_HOURS=${SIVACOR_MAX_LIFETIME_HOURS:-30}
+      # Must stay above the server's sivacor.max_runtime (168h, seeded in
+      # setup_girder.py) or this deletes workers the reaper still considers
+      # healthy. The 12h of headroom covers boot, a cold image pull (~15 GB for
+      # MATLAB) and the post-run zip/upload/sign tail -- this ceiling has to
+      # cover pull + run, not run alone. Raising it also raises the worst-case
+      # bill for a VM whose self-shutdown never fires: 180h x 8 SU/hr = 1440 SU.
+      - SIVACOR_MAX_LIFETIME_HOURS=${SIVACOR_MAX_LIFETIME_HOURS:-180}
       - SIVACOR_BREAKER_THRESHOLD=${SIVACOR_BREAKER_THRESHOLD:-3}
       - SIVACOR_INTERVAL=${SIVACOR_INTERVAL:-30}
       # D9. Unset = off, which is the safe default: arming this against a worker

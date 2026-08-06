@@ -58,7 +58,7 @@ existing `.env` needs none of them.
 | `OS_CLOUDS_FILE` | `/home/ubuntu/.config/openstack/clouds.yaml` | Host path bind-mounted read-only into the autoscaler. |
 | `SIVACOR_PROVISION_DEADLINE_MINUTES` | unset (**off**) | Reap instances that never announce readiness. Off is the safe default; arming it against a worker image that does not announce deletes every healthy instance. |
 | `SIVACOR_MAX_INSTANCES` | `5` | Fleet cap. Configure **below** the OpenStack quota — the same 25 instances carry the manager, the test mirror and any debug VM. |
-| `SIVACOR_MAX_LIFETIME_HOURS` | `30` | Delete a live instance older than this whatever it claims to be doing. Must stay above the server's `sivacor.max_runtime`. |
+| `SIVACOR_MAX_LIFETIME_HOURS` | `180` | Delete a live instance older than this whatever it claims to be doing. Must stay above the server's `sivacor.max_runtime` (168h, seeded by `setup_girder.py`) — 12h of headroom for boot, a cold pull and the post-run upload. A stuck VM costs 8 SU/hr for the whole window. |
 | `SIVACOR_BREAKER_THRESHOLD` | `3` | Stop creating after N consecutive instances fail to register. |
 | `SIVACOR_INTERVAL` | `30` | Seconds between control-loop ticks. |
 | `SIVACOR_OS_KEYPAIR` | unset | SSH key for workers. Keyless is legitimate but undebuggable; the controller warns. A key cannot be added to a running instance. |

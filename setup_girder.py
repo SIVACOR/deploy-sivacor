@@ -106,6 +106,25 @@ settings = [
         "value": os.environ.get("ORCID_CLIENT_SECRET"),
     },
     {"key": "oauth.providers_enabled", "value": ["globus"]},
+    # Both of these override the plugin defaults (24h / 7 days), which stay put
+    # for deploy-dev and anyone else. Our worst real workflows need days, not
+    # hours.
+    #
+    # THEY MOVE TOGETHER. cleanup_submissions() deletes a submission folder
+    # `retention_days` after the folder was CREATED, not after the run ended,
+    # and does not check whether the job is still running. So retention must
+    # exceed max_runtime, or a long job's results are swept away as it finishes
+    # -- exactly the submissions the raised cap exists to serve. 14 vs 7 days
+    # leaves a full week to download after a worst-case run.
+    #
+    # SIVACOR_MAX_LIFETIME_HOURS in docker-stack.autoscaler.yml must in turn stay
+    # above max_runtime, or the autoscaler deletes workers the reaper still
+    # considers healthy. Current chain: 168h run < 180h VM lifetime, 14d retention.
+    # Both MUST be floats, not ints: the validators are isinstance(value, float)
+    # and an int is rejected outright (girder_sivacor/__init__.py:45,57). The
+    # plugin's own int default slips through only because defaults skip validation.
+    {"key": "sivacor.max_runtime", "value": 168.0},
+    {"key": "sivacor.retention_days", "value": 14.0},
     {
         "key": "sivacor.tro_gpg_fingerprint",
         "value": os.environ.get("GIRDER_SIVACOR_TRO_GPG_FINGERPRINT"),
