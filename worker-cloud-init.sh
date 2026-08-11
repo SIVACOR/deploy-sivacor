@@ -85,6 +85,37 @@ BOOT_GRACE_SEC="${BOOT_GRACE_SEC:-600}"
 # trip (~1 s observed, 300 s timeout), because that is the one window where a
 # healthy worker is legitimately idle mid-chain.
 UNREACHABLE_TICKS="${UNREACHABLE_TICKS:-8}"
+# Consecutive unreachable ticks before trying to RECOVER the worker -- one
+# `docker restart sivacor-worker` -- instead of going straight to poweroff. 0
+# disables recovery and restores the pre-2026-08-11 behaviour.
+#
+# Why this exists. On 2026-08-11 a worker's celery MainProcess died silently at
+# 15:09 while its pool worker ran Stata for another two hours. The child finished
+# at 17:13, published the chain's next step (`LLEN 1` on the private queue), and
+# nothing consumed it: the parent was gone. Heartbeats had kept flowing the whole
+# time because they are HTTP calls made by the *child*, so Girder saw a healthy
+# submission until the moment it had none. Restarting the container by hand
+# recovered it completely -- the queued task was consumed, the chain continued,
+# and the submission reached a truthful terminal state, preserving 2 h 52 m of
+# completed compute that would otherwise have been reaped as "no heartbeat".
+# Three submissions were lost this way on 2026-08-10/11 before anyone was watching
+# at the right moment. This makes that recovery automatic.
+#
+# Safe by construction: the unreachable path is only reached once `docker ps` has
+# succeeded AND reported zero analysis containers, so a restart can never
+# interrupt a running analysis. It also cannot fire during the legitimate
+# mid-chain idle window (sign_tro on the manager), because there celery is healthy
+# and answers `inspect` with "idle" -- that is `busy`/idle, never `unreachable`.
+#
+# THE RESIDUAL RISK, stated plainly: a container-less pool task -- create_workspace
+# unzipping a multi-GB package, prune, upload_workspace -- runs with no analysis
+# container, so if the parent wedges during one, a restart kills the child's
+# in-flight work (celery acks on receipt, so the message is already gone). The
+# workspace-activity check below defers the restart while anything is still
+# writing, which covers the common case; it cannot cover a child stalled on a
+# network write. Weigh that against the alternative, which is losing the
+# submission every time.
+RECOVER_TICKS="${RECOVER_TICKS:-3}"
 DEPLOY_USER="ubuntu"; DEPLOY_UID=1000; DEPLOY_GID=1000
 
 # ---- secrets: filled in by the controller; empty = provision manually --------
@@ -276,13 +307,92 @@ cat > /usr/local/bin/sivacor-worker-idle-check <<PRE
 IDLE_TIMEOUT_SEC=${IDLE_TIMEOUT_SEC}
 BOOT_GRACE_SEC=${BOOT_GRACE_SEC}
 UNREACHABLE_TICKS=${UNREACHABLE_TICKS}
+RECOVER_TICKS=${RECOVER_TICKS}
+# Host side of the worker's -v ...:/tmp bind mount, so in-flight work can be seen
+# without going through the container at all -- see workspace_activity().
+WORKER_TMP_HOSTPATH=/home/${DEPLOY_USER}/volumes/tmp
 PRE
 cat >> /usr/local/bin/sivacor-worker-idle-check <<'IDLE'
 WORKER_CONTAINER=sivacor-worker
 STATE=/run/sivacor-idle-since   # /run is tmpfs, so both reset on boot
 FAILS=/run/sivacor-probe-failures
+RECOVERED=/run/sivacor-recovery-attempted   # one restart per wedge, not per tick
 
 log() { echo "$(date -Is) $*"; }
+
+# Everything we will wish we had after the VM is gone. Printed, not saved: /run is
+# tmpfs and the disk is about to be destroyed either way, whereas stdout reaches
+# journal+console, and the console survives long enough for the controller to
+# capture it on the way past (sivacor-autoscaler's pre-delete diagnostics).
+#
+# The question this is here to answer: when celery stops answering, is the process
+# blocked in the kernel (`D` state, with a wchan naming what on) or starved of
+# memory (PSI `some`/`full` climbing)? On 2026-08-11 that could not be settled --
+# TCP keepalive was armed and the socket healthy, so the connection was not the
+# problem, and by the time anyone looked the process had been restarted.
+#
+# NOTHING HERE READS CONTAINER LOGS, deliberately. A celery result line can carry
+# the submission's `encrypted_secrets` and `wrapped_job_key`, which is why the
+# inspect payload upstream is reduced to a count before it is logged. Process
+# state, memory pressure and kernel messages carry no job material.
+dump_wedge_state() {
+  main_pid=$(docker inspect -f '{{.State.Pid}}' "$WORKER_CONTAINER" 2>/dev/null)
+  log "---- wedge diagnostics: celery main pid ${main_pid:-UNKNOWN} ----"
+  if [ -n "$main_pid" ]; then
+    # STAT is the payload: `D` means uninterruptible sleep, which no signal can
+    # clear and only a restart escapes. WCHAN names the kernel function it is in.
+    ps -o pid,ppid,stat,wchan:24,etime,pcpu,rss,cmd -p "$main_pid" 2>&1 | sed 's/^/    /'
+    ps -o pid,stat,wchan:24,etime,pcpu,rss,cmd --ppid "$main_pid" 2>&1 | sed 's/^/    /' | head -20
+    sed -n 's/^\(State\|Threads\|VmRSS\):/    &/p' "/proc/$main_pid/status" 2>/dev/null
+    # Root-only and often "0xffffffffffffffff [<0>]" for a healthy process; when it
+    # is not, it names the exact blocking call.
+    { echo "    /proc/$main_pid/stack:"; head -12 "/proc/$main_pid/stack" 2>&1 | sed 's/^/      /'; }
+  fi
+  # PSI. `full` above zero means every task was stalled on memory -- the direct
+  # test of the starvation theory, and it costs nothing to read.
+  { echo "    /proc/pressure/memory:"; sed 's/^/      /' /proc/pressure/memory 2>&1; }
+  free -m 2>&1 | sed 's/^/    /'
+  df -h / 2>&1 | tail -1 | sed 's/^/    /'
+  # hung_task_timeout_secs fires at 120 s in D state and names the process.
+  dmesg -T 2>/dev/null | grep -iE "oom|out of memory|killed process|hung task|blocked for more than" \
+    | tail -8 | sed 's/^/    /'
+  log "---- wedge diagnostics end ----"
+}
+
+# Is anything still writing? A pool task with no analysis container -- unzipping a
+# package, pruning, uploading -- is invisible to the container check above, and
+# restarting on top of one loses its work (celery acks on receipt). Recent mtimes
+# under /tmp, where tmp_dir and workspace_dir both live (lib.py), are the cheapest
+# evidence that a child is still doing something. It cannot see a child stalled on
+# a network write, which is why this defers recovery rather than cancelling it:
+# the ticks keep counting and the poweroff net still backstops us.
+#
+# Read from the HOST side of the worker's `-v .../volumes/tmp:/tmp` bind mount
+# rather than through `docker exec`. Two reasons, both learned here: the probe must
+# not depend on `find` existing in the analysis-agnostic worker image, and more
+# importantly it must not depend on the container being answerable at all -- this
+# runs precisely when the worker is not answering, and a second probe sharing that
+# failure mode is how the original `inspect` check became ambiguous in the first
+# place. GNU find is guaranteed on the Ubuntu host.
+#
+# Echoes active | quiet | unknown. `unknown` is a distinct answer on purpose: a
+# two-state version would report "quiet" when it simply could not look, and this
+# safety check would be silently inert -- the same shape of bug as an unarmed
+# readiness marker. Say so instead, and let the caller decide in the open.
+workspace_activity() {
+  [ -d "$WORKER_TMP_HOSTPATH" ] || { echo unknown; return; }
+  # -mindepth 1 is load-bearing: without it the mount point matches itself, and its
+  # own mtime bumps whenever any workspace directory is created or removed -- so
+  # every wedge that happened to follow a workspace change would read as "active"
+  # and defer recovery until the poweroff net caught it. That is the bug this
+  # check exists to avoid, arriving through the check itself.
+  if find "$WORKER_TMP_HOSTPATH" -mindepth 1 -maxdepth 3 -newermt '-3 minutes' \
+       -print -quit 2>/dev/null | grep -q .; then
+    echo active
+  else
+    echo quiet
+  fi
+}
 
 # THREE outcomes, not two. The original had only `busy`, which cleared the idle
 # clock unconditionally -- so a probe that merely *failed* threw away up to
@@ -297,7 +407,10 @@ log() { echo "$(date -Is) $*"; }
 #   unreachable -- celery specifically will not answer, but we have already
 #                  confirmed uptime past the grace and no analysis containers.
 #                  Count it; reclaim once it is clearly not coming back.
-busy()    { rm -f "$STATE" "$FAILS"; log "BUSY: $* -- staying up"; exit 0; }
+# $RECOVERED is cleared here too: a worker that has answered again is healthy, and
+# a *later* wedge deserves its own recovery attempt rather than inheriting a spent
+# marker from an earlier one.
+busy()    { rm -f "$STATE" "$FAILS" "$RECOVERED"; log "BUSY: $* -- staying up"; exit 0; }
 blocked() { log "BLOCKED: $* -- staying up, idle clock preserved"; exit 0; }
 
 # 1. Boot grace. A VM created for a queued submission must not power off before
@@ -346,10 +459,52 @@ unreachable() {
   if [ "$n" -ge "$UNREACHABLE_TICKS" ]; then
     # Safe to act on: we are past the boot grace and have already confirmed there
     # are no analysis containers, both checked above this point.
+    #
+    # Dumped again even though recovery already dumped once: this is the state
+    # *after* a restart failed to help, which is the more interesting of the two
+    # and the last chance to record anything at all.
+    dump_wedge_state
     log "celery unreachable for $n consecutive ticks, no containers -- POWERING OFF ($*)"
     systemctl poweroff
     exit 0
   fi
+
+  # Try to fix it before reclaiming it. A restart costs ~30 s and recovers the
+  # submission; a poweroff destroys it. Ordered after the poweroff check so a
+  # RECOVER_TICKS misconfigured above UNREACHABLE_TICKS still ends in a reclaim
+  # rather than an immortal VM.
+  if [ "${RECOVER_TICKS:-0}" -gt 0 ] && [ "$n" -ge "$RECOVER_TICKS" ] && [ ! -f "$RECOVERED" ]; then
+    case "$(workspace_activity)" in
+      active)
+        # Something is still writing, so a child is still working even though
+        # celery cannot say so. Do not restart on top of it.
+        log "RECOVERY DEFERRED ($n/$UNREACHABLE_TICKS): /tmp written to in the last 3 min"
+        exit 0 ;;
+      unknown)
+        # Proceed rather than defer: deferring forever loses the submission, which
+        # is the outcome this whole branch exists to prevent. But never silently.
+        log "RECOVERY: cannot see $WORKER_TMP_HOSTPATH to check for in-flight work -- restarting anyway" ;;
+    esac
+    dump_wedge_state
+    : > "$RECOVERED"
+    log "RECOVERY ($n/$UNREACHABLE_TICKS): restarting $WORKER_CONTAINER -- celery is deaf but this VM may still hold a queued task"
+    # `systemctl restart`, NOT `docker restart`. The unit runs `docker run --rm` in
+    # the foreground under Restart=always, so a `docker restart` removes the
+    # container, drops the foreground process, and leaves systemd to notice and
+    # rebuild it ~10 s later via ExecStartPre -- the right outcome by luck, through
+    # a path that races itself. (That is what the manual recovery on 2026-08-11
+    # actually did.) systemctl runs ExecStop -> ExecStartPre -> ExecStart in order.
+    if out=$(systemctl restart "$WORKER_CONTAINER".service 2>&1); then
+      # Deliberately not verified here. celery needs ~30 s to reconnect and the
+      # next tick is 2 min away, so let the normal probe decide: a recovered
+      # worker answers and goes busy/idle, a dead one keeps counting to poweroff.
+      log "RECOVERY: restart issued; the next tick decides whether it took"
+    else
+      log "RECOVERY FAILED: systemctl restart said: $(printf '%s' "$out" | head -c 200)"
+    fi
+    exit 0
+  fi
+
   log "UNREACHABLE ($n/$UNREACHABLE_TICKS): $* -- staying up, idle clock preserved"
   exit 0
 }
