@@ -56,6 +56,16 @@ services:
       # owned by the host user. `OS_*` environment variables work too -- openstacksdk
       # reads either -- but a bind mount keeps one more credential out of .env.
       - ${OS_CLOUDS_FILE:-/home/ubuntu/.config/openstack/clouds.yaml}:/home/autoscaler/.config/openstack/clouds.yaml:ro
+      # Pre-delete post-mortems. Must be a HOST path: the whole point is to outlive
+      # the instance, and a directory inside the container dies with the container.
+      # Treat it like a log with a researcher's data adjacent to it -- console
+      # buffers are uncurated, and the controller writes each dump 0600.
+      #
+      # The container runs as uid 1000, so the host directory must be writable by it:
+      #   mkdir -p ~/sivacor-diagnostics && sudo chown 1000:1000 ~/sivacor-diagnostics
+      # Getting this wrong is silent-ish -- one warning per reap, then an empty
+      # directory when someone finally goes looking for the dump.
+      - ${SIVACOR_DIAGNOSTICS_HOSTPATH:-/home/ubuntu/sivacor-diagnostics}:/var/lib/sivacor/diagnostics
     environment:
       - OS_CLOUD=${OS_CLOUD:?OS_CLOUD must be set, naming an entry in clouds.yaml}
       # Which instances this controller owns. It tags every instance it creates with
@@ -120,6 +130,16 @@ services:
       - SIVACOR_OS_FLAVOR=${SIVACOR_OS_FLAVOR:-m3.medium}
       - SIVACOR_OS_NETWORK=${SIVACOR_OS_NETWORK:-auto_allocated_network}
       - SIVACOR_OS_SECGROUPS=${SIVACOR_OS_SECGROUPS:-}
+      # Where the controller dumps an instance's console log, Nova fault and action
+      # log immediately BEFORE deleting it, when it is being reaped for a reason that
+      # is not a clean finish. Unset disables capture.
+      #
+      # This exists because of 2026-08-10/11: three submissions were reaped for "no
+      # heartbeat" after their worker powered itself off mid-run, and the controller
+      # deleted each one ~17 min later -- taking the console buffer, the only record
+      # of why, with it. A worker VM has no floating IP and its journal dies with its
+      # disk, so this is the sole post-mortem that exists.
+      - SIVACOR_DIAGNOSTICS_DIR=${SIVACOR_DIAGNOSTICS_DIR:-/var/lib/sivacor/diagnostics}
     # No extra_hosts: this process makes no HTTP call to Girder, so the floating-IP
     # hairpin problem (P1.3 finding 5) that every other service works around simply
     # does not arise here.
