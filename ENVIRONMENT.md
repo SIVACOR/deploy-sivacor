@@ -28,7 +28,7 @@ has to contain.
 | `GIRDER_SMTP_USERNAME` / `GIRDER_SMTP_PASSWORD` | Outgoing mail on `mail.spacemail.com`. |
 | `GLOBUS_CLIENT_ID` / `GLOBUS_CLIENT_SECRET` | Globus OAuth. |
 | `ORCID_CLIENT_ID` / `ORCID_CLIENT_SECRET` | ORCID OAuth (the primary login path). |
-| `GIRDER_SIVACOR_TRO_GPG_FINGERPRINT` / `GIRDER_SIVACOR_TRO_GPG_PASSPHRASE` | TRS signing key, for `run_tro("sign")`. |
+| `GIRDER_SIVACOR_TRO_GPG_FINGERPRINT` / `GIRDER_SIVACOR_TRO_GPG_PASSPHRASE` | TRS signing key, for `run_tro("sign")`. **Read only on a first-time setup.** `setup_girder.py` seeds these into `sivacor.tro_gpg_fingerprint` / `sivacor.tro_gpg_passphrase`, but it exits at its admin-user check on any database that already has an admin — so editing them here and re-running `make dev` changes nothing, and still prints "You should be all set!!". Change them through the settings API or the admin UI. Same applies to `sivacor.stata_license` from `STATA_LICENSE_HOSTPATH`. See *Deployment traps* 6 in `autoscaling_plan.md`. |
 | `MASTER_KEY_HEX` | See below. |
 | `REDIS_PASSWORD` | See below. **New — an existing `.env` without it will refuse to deploy.** |
 
