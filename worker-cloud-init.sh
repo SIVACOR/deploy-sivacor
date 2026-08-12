@@ -244,6 +244,40 @@ for img in "${PREPULL_IMAGES[@]}"; do
 done
 df -h / | tail -1
 
+# ---- py-spy, on the host -------------------------------------------------
+# dump_wedge_state() runs here, as root, against host-namespace pids, so py-spy
+# has to be a HOST binary. Inside the container it would need CAP_SYS_PTRACE,
+# which this deliberately hardened worker does not get, and reaching it with
+# `docker exec` would make the probe depend on the container being answerable --
+# precisely the mistake the celery `inspect` check already made, and the reason
+# workspace_activity() reads the host side of the mount instead.
+#
+# Downloaded, which is what lets this ship through a change to *this file alone*:
+# the autoscaler bind-mounts this template, so the next worker to boot has py-spy
+# with no worker-image rebuild and push in the way.
+#
+# https, not http, because this binary is executed as root. The sha256 is pinned
+# and verified: py-spy 0.4.2, confirmed byte-identical to the binary in the PyPI
+# wheel, so a substituted or truncated download is rejected rather than run. The
+# URL is a mutable upload, so treat a checksum failure as "someone replaced it",
+# not as noise -- tests/wedge-dump-test.sh fails loudly when the two drift.
+#
+# Best-effort by construction: a worker without py-spy still boots, still
+# recovers, and still dumps kernel state. It just cannot name the Python frame.
+PY_SPY_URL="https://use.yt/upload/c90d5c7c"
+PY_SPY_SHA256="9b4d1f39b2a47ae44f4c6a46f615dcc0287d7755beba5065f32391951e07d594"
+# -o and never -JLO: -J takes the filename from the server and -O writes it to the
+# current directory, neither of which a boot script should delegate.
+if curl -fsSL --max-time 120 -o /usr/local/bin/py-spy.new "$PY_SPY_URL" 2>/dev/null \
+   && printf '%s  %s\n' "$PY_SPY_SHA256" /usr/local/bin/py-spy.new | sha256sum -c --status; then
+  chmod 755 /usr/local/bin/py-spy.new
+  mv /usr/local/bin/py-spy.new /usr/local/bin/py-spy
+  echo "py-spy on host: $(/usr/local/bin/py-spy --version 2>&1 | head -1) from ${PY_SPY_URL}"
+else
+  rm -f /usr/local/bin/py-spy.new
+  echo "!! py-spy unavailable (download failed or checksum mismatch) -- wedge dumps will be kernel-only"
+fi
+
 # ---- systemd unit: installed, NOT started (needs credentials) ------------
 # --entrypoint is REQUIRED: the image's ENTRYPOINT is the girder server
 # (tini -- gunicorn ... girder_sivacor.asgi:app). Appending a command only passes
@@ -314,6 +348,9 @@ WORKER_TMP_HOSTPATH=/home/${DEPLOY_USER}/volumes/tmp
 PRE
 cat >> /usr/local/bin/sivacor-worker-idle-check <<'IDLE'
 WORKER_CONTAINER=sivacor-worker
+# Extracted from the worker image at boot; absent is a supported state, see
+# dump_wedge_state(). A host binary on purpose: this script runs on the host.
+PY_SPY=/usr/local/bin/py-spy
 STATE=/run/sivacor-idle-since   # /run is tmpfs, so both reset on boot
 FAILS=/run/sivacor-probe-failures
 RECOVERED=/run/sivacor-recovery-attempted   # one restart per wedge, not per tick
@@ -336,17 +373,55 @@ log() { echo "$(date -Is) $*"; }
 # inspect payload upstream is reduced to a count before it is logged. Process
 # state, memory pressure and kernel messages carry no job material.
 dump_wedge_state() {
-  main_pid=$(docker inspect -f '{{.State.Pid}}' "$WORKER_CONTAINER" 2>/dev/null)
-  log "---- wedge diagnostics: celery main pid ${main_pid:-UNKNOWN} ----"
-  if [ -n "$main_pid" ]; then
+  # `.State.Pid` is the container's PID 1, and that is **tini**, not celery -- the
+  # unit runs `--entrypoint /usr/bin/tini`. Reading /proc/<that pid>/ is what the
+  # first version did, and on 2026-08-12 it wasted the only dump of a real wedge:
+  # every expensive field described tini asleep in do_sigtimedwait, including
+  # `Threads: 1`, which reads as "nothing here could deadlock". The Python
+  # MainProcess was one level down, in wait_woken. Resolve the child.
+  tini_pid=$(docker inspect -f '{{.State.Pid}}' "$WORKER_CONTAINER" 2>/dev/null)
+  # A missing container prints nothing and a stopped one prints 0. Both have to
+  # become "no pid": `pgrep -P 0` is not empty, it returns **PID 1**, so a
+  # defaulted `${tini_pid:-0}` makes this dump describe systemd as the celery
+  # MainProcess and point py-spy at init. Caught by tests/wedge-dump-test.sh.
+  case "${tini_pid:-}" in ''|0|*[!0-9]*) tini_pid="" ;; esac
+  celery_pid=""
+  if [ -n "$tini_pid" ]; then
+    celery_pid=$(pgrep -P "$tini_pid" -f celery 2>/dev/null | head -1)
+    # Fall back to tini's first child: better a slightly wrong pid than none, and if
+    # the cmdline ever stops saying "celery" this still finds the process that matters.
+    [ -z "$celery_pid" ] && celery_pid=$(pgrep -P "$tini_pid" 2>/dev/null | head -1)
+  fi
+  log "---- wedge diagnostics: tini ${tini_pid:-UNKNOWN}, celery MainProcess ${celery_pid:-UNKNOWN} ----"
+  if [ -n "$tini_pid" ]; then
+    # One line of context. tini idles in do_sigtimedwait forever, by design, so it
+    # is only here to prove the shape of the tree and never as evidence.
+    ps -o pid,ppid,stat,wchan:24,etime,pcpu,rss,cmd -p "$tini_pid" 2>&1 | sed 's/^/    /'
+  fi
+  if [ -n "$celery_pid" ]; then
     # STAT is the payload: `D` means uninterruptible sleep, which no signal can
-    # clear and only a restart escapes. WCHAN names the kernel function it is in.
-    ps -o pid,ppid,stat,wchan:24,etime,pcpu,rss,cmd -p "$main_pid" 2>&1 | sed 's/^/    /'
-    ps -o pid,stat,wchan:24,etime,pcpu,rss,cmd --ppid "$main_pid" 2>&1 | sed 's/^/    /' | head -20
-    sed -n 's/^\(State\|Threads\|VmRSS\):/    &/p' "/proc/$main_pid/status" 2>/dev/null
+    # clear and only a restart escapes. `S` with 0% CPU means it is waiting for
+    # something that is not coming -- a deadlock or a lost wakeup. WCHAN names the
+    # kernel function it is in.
+    ps -o pid,ppid,stat,wchan:24,etime,pcpu,rss,cmd -p "$celery_pid" 2>&1 | sed 's/^/    /'
+    # Children: the billiard pool worker(s). Their state is half the story, because
+    # the pipe between them and the parent is a prime suspect for the lost wakeup.
+    ps -o pid,stat,wchan:24,etime,pcpu,rss,cmd --ppid "$celery_pid" 2>&1 | sed 's/^/    /' | head -12
+    sed -n 's/^\(State\|Threads\|VmRSS\):/    &/p' "/proc/$celery_pid/status" 2>/dev/null
+    # Per THREAD, because a deadlock is a property of a thread and the process-level
+    # view hides it. Usually one line: celery's MainProcess drives an event loop, not
+    # a thread pool, and a healthy one measured 2026-08-12 reports `Threads: 1`. When
+    # it is *not* one line, the thread that is somewhere its siblings are not is the
+    # whole answer, and printing it costs nothing.
+    { echo "    threads of $celery_pid:"
+      for t in "/proc/$celery_pid/task/"*; do
+        [ -d "$t" ] || continue
+        printf '      tid %s %-16s wchan=%s\n' "${t##*/}" \
+          "$(cat "$t/comm" 2>/dev/null)" "$(cat "$t/wchan" 2>/dev/null)"
+      done | head -16; }
     # Root-only and often "0xffffffffffffffff [<0>]" for a healthy process; when it
     # is not, it names the exact blocking call.
-    { echo "    /proc/$main_pid/stack:"; head -12 "/proc/$main_pid/stack" 2>&1 | sed 's/^/      /'; }
+    { echo "    /proc/$celery_pid/stack:"; head -12 "/proc/$celery_pid/stack" 2>&1 | sed 's/^/      /'; }
   fi
   # PSI. `full` above zero means every task was stalled on memory -- the direct
   # test of the starvation theory, and it costs nothing to read.
@@ -356,6 +431,22 @@ dump_wedge_state() {
   # hung_task_timeout_secs fires at 120 s in D state and names the process.
   dmesg -T 2>/dev/null | grep -iE "oom|out of memory|killed process|hung task|blocked for more than" \
     | tail -8 | sed 's/^/    /'
+  # The Python frame, which is the entire point of the exercise. Kernel state can
+  # only ever say "blocked in an interruptible wait", and every candidate cause --
+  # kombu's broker read, the billiard result pipe from the pool worker -- looks
+  # identical from there. py-spy names the line of code.
+  #
+  # Deliberately LAST, and time-boxed. It is the only part of this dump that can
+  # hang, and everything above must already be in the journal before we risk it: a
+  # py-spy that hung would be killed along with the whole oneshot check, taking the
+  # cheap evidence with it. It also ptrace-pauses the target for a moment, which is
+  # only acceptable because the caller restarts that process seconds later.
+  if [ -n "$celery_pid" ] && [ -x "$PY_SPY" ]; then
+    { echo "    py-spy dump (Python stacks, all threads):"
+      timeout 20 "$PY_SPY" dump --pid "$celery_pid" 2>&1 | head -60 | sed 's/^/      /'; }
+  elif [ -n "$celery_pid" ]; then
+    echo "    py-spy: ${PY_SPY} absent -- kernel state only, no Python frames"
+  fi
   log "---- wedge diagnostics end ----"
 }
 
