@@ -35,11 +35,21 @@ services:
   # delete except the tags it filters on. Treat clouds.yaml here the way the GPG
   # keyring is treated on `local_worker`.
   autoscaler:
-    # Pin this in .env before merging the autoscaler to main. CI pushes `latest`
-    # from main, and a default of `:latest` would make the merge itself change what
-    # production runs -- the P0.3 failure, which this stack already carries once for
-    # girder-sivacor. `sha-<short>` tags exist precisely so a deployment can pin.
-    image: ${SIVACOR_AUTOSCALER_IMAGE:-docker.io/xarthisius/sivacor-autoscaler:latest}
+    # The controller runs from the girder-sivacor image, not its own
+    # (worker_sizing_plan.md S3, P0.5): assignment happens through Girder's model
+    # layer in-process, which needs girder/girder_worker/girder_sivacor importable.
+    # `beat` and `local_worker` already do exactly this with different entrypoints;
+    # this is the third. `SIVACOR_AUTOSCALER_IMAGE` is retired.
+    #
+    # Pin this in .env. Both this file and docker-stack.yml default to `latest`, so
+    # an unpinned deployment lets a merge to girder-sivacor main change what
+    # production runs -- the P0.3 failure. girder-sivacor's CI now pushes
+    # `sha-<short>` tags (added in P0.5) precisely so a deployment can pin; before
+    # that it pushed `latest` only and pinning was not possible.
+    image: ${GIRDER_SIVACOR_IMAGE:-docker.io/xarthisius/girder-sivacor:latest}
+    # tini as PID 1, matching `beat` and `local_worker`. The image's own ENTRYPOINT
+    # is gunicorn; this replaces it wholesale.
+    entrypoint: ["/usr/bin/tini", "--", "sivacor-autoscaler"]
     networks:
       # Redis for queue depth and readiness markers, Mongo for the job documents.
       # Nothing else: it makes no HTTP calls and is not behind traefik.
@@ -55,7 +65,15 @@ services:
       # The only way this process can reach OpenStack. Read-only, and the file stays
       # owned by the host user. `OS_*` environment variables work too -- openstacksdk
       # reads either -- but a bind mount keeps one more credential out of .env.
-      - ${OS_CLOUDS_FILE:-/home/ubuntu/.config/openstack/clouds.yaml}:/home/autoscaler/.config/openstack/clouds.yaml:ro
+      #
+      # Mounted at a neutral path and located via OS_CLIENT_CONFIG_FILE below, rather
+      # than at `~/.config/openstack/clouds.yaml`. The old path was
+      # /home/autoscaler/..., which does not exist in the girder-sivacor image (its
+      # user is `girder`), so this had to move regardless; a fixed path under
+      # /etc/sivacor -- where worker-cloud-init.sh already lives -- means the mount
+      # no longer silently depends on which user the image happens to run as.
+      # The host file must still be readable by uid 1000, exactly as before.
+      - ${OS_CLOUDS_FILE:-/home/ubuntu/.config/openstack/clouds.yaml}:/etc/sivacor/clouds.yaml:ro
       # Pre-delete post-mortems. Must be a HOST path: the whole point is to outlive
       # the instance, and a directory inside the container dies with the container.
       # Treat it like a log with a researcher's data adjacent to it -- console
@@ -68,6 +86,9 @@ services:
       - ${SIVACOR_DIAGNOSTICS_HOSTPATH:-/home/ubuntu/sivacor-diagnostics}:/var/lib/sivacor/diagnostics
     environment:
       - OS_CLOUD=${OS_CLOUD:?OS_CLOUD must be set, naming an entry in clouds.yaml}
+      # Where the bind-mounted clouds.yaml actually is. See the volume comment: this
+      # decouples the credential's path from the image's user and home directory.
+      - OS_CLIENT_CONFIG_FILE=/etc/sivacor/clouds.yaml
       # Which instances this controller owns. It tags every instance it creates with
       # `sivacor-deployment:<this>` and REQUIRES that tag on any instance it counts or
       # deletes, because production and the test mirror share one OpenStack project

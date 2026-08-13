@@ -54,8 +54,8 @@ existing `.env` needs none of them.
 | `OS_CLOUD` | — | Entry in `clouds.yaml`. **Required when `SIVACOR_AUTOSCALING` is set**, unused otherwise. |
 | `SIVACOR_MANAGER_TENANT_IP` | discovered | Manager's tenant address, **not** its floating IP — written into worker user-data. The Makefile derives it like `docker_group`; an explicit value wins. Only consulted with `SIVACOR_AUTOSCALING`. |
 | `SIVACOR_DEPLOYMENT` | `$domain` (derived by the Makefile) | Which fleet this controller owns. Every instance it creates is tagged `sivacor-deployment:<this>`, and it **refuses to count or delete** any `sivacor-worker` instance without that tag. Load-bearing because production and the test mirror share **one OpenStack project**: with a single shared tag each controller reads the other's workers as available capacity (their claim markers live in the other deployment's Girder), so a queued submission gets no VM, and each reaps the other's `SHUTOFF`s. Only override it to run two fleets on one domain. |
-| `SIVACOR_AUTOSCALER_IMAGE` | `docker.io/xarthisius/sivacor-autoscaler:latest` | Controller image. **Pin this on production** — see *The autoscaler*. |
-| `OS_CLOUDS_FILE` | `/home/ubuntu/.config/openstack/clouds.yaml` | Host path bind-mounted read-only into the autoscaler. |
+| `SIVACOR_AUTOSCALER_IMAGE` | — | **Retired 2026-08-13 (P0.5).** The controller now runs from `GIRDER_SIVACOR_IMAGE`, like `beat` and `local_worker`. Setting this has no effect. |
+| `OS_CLOUDS_FILE` | `/home/ubuntu/.config/openstack/clouds.yaml` | Host path bind-mounted read-only into the autoscaler, at `/etc/sivacor/clouds.yaml` and found via `OS_CLIENT_CONFIG_FILE`. Must be readable by uid 1000. |
 | `SIVACOR_PROVISION_DEADLINE_MINUTES` | unset (**off**) | Reap instances that never announce readiness. Off is the safe default; arming it against a worker image that does not announce deletes every healthy instance. |
 | `SIVACOR_MAX_INSTANCES` | `5` | Fleet cap. Configure **below** the OpenStack quota — the same 25 instances carry the manager, the test mirror and any debug VM. |
 | `SIVACOR_MAX_LIFETIME_HOURS` | `180` | Delete a live instance older than this whatever it claims to be doing. Must stay above the server's `sivacor.max_runtime` (168h, seeded by `setup_girder.py`) — 12h of headroom for boot, a cold pull and the post-run upload. A stuck VM costs 8 SU/hr for the whole window. |
@@ -394,14 +394,21 @@ autoscaler only reads.
 
 ### Pin the image before merging to main
 
-CI pushes `latest` from `main`, and `docker-stack.yml` defaults to `latest` — so
-merging would change what production runs without anyone deploying. The workflow also
-pushes an immutable `sha-<short>` tag for exactly this reason:
+CI pushes `latest` from `main`, and both stack files default to `latest` — so merging
+would change what production runs without anyone deploying. Since P0.5 the controller
+shares the **girder-sivacor** image, so this is now the same pin that governs `girder`,
+`beat` and `local_worker`, and one variable covers all four:
 
 ```sh
 docker service inspect --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' wt_autoscaler
-# -> export SIVACOR_AUTOSCALER_IMAGE=docker.io/xarthisius/sivacor-autoscaler@sha256:...
+# -> export GIRDER_SIVACOR_IMAGE=docker.io/xarthisius/girder-sivacor@sha256:...
 ```
+
+`girder-sivacor`'s workflow pushes an immutable `sha-<short>` tag for exactly this
+purpose. It did **not** before 2026-08-13 — it pushed `latest` only, so pinning by tag
+was impossible and this instruction could not be followed for anything on that image.
+Adding it was part of P0.5, because consolidating onto a `latest`-only image would have
+put the fleet controller behind the very failure mode this section warns about.
 
 ### Logs are secret-bearing until proven otherwise
 
