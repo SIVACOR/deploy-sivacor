@@ -68,6 +68,22 @@ MANAGER_TENANT_IP="${MANAGER_TENANT_IP:-10.3.37.197}"
 declare -p PREPULL_IMAGES >/dev/null 2>&1 || PREPULL_IMAGES=()
 # Empty -> sivacor.<instance-uuid>, unique per VM with no coordination.
 WORKER_QUEUE_OVERRIDE="${WORKER_QUEUE_OVERRIDE:-}"
+# What celery subscribes to. Empty -> `sivacor,<this VM's private queue>`, i.e. both
+# the shared dispatch queue and its own, which is what every worker has always done.
+#
+# Set `SIVACOR_WORKER_QUEUES=private` in the deployment's .env -- injected by the
+# controller -- once targeted assignment is armed there and nothing publishes to
+# `sivacor` any more (worker_sizing_plan.md P2, rollout step 4). See the case statement
+# below for why the value is a word and not a queue list. It is a
+# variable rather than an edit to the line below because THIS FILE IS SHARED: one
+# checkout is bind-mounted by the mirror and by production, which are at different
+# stages of that rollout. Narrowing it in the file would take effect on production's
+# next pull, while production is still flag-off and publishing to `sivacor` -- every
+# submission would strand with the fleet reading healthy. Same reasoning, and the same
+# shape, as SIVACOR_MANAGER_QUEUES for the manager's own worker.
+#
+# The default is applied further down, once WORKER_QUEUE actually has a value.
+WORKER_QUEUES="${WORKER_QUEUES:-}"
 # Serve one submission, then stop consuming the shared dispatch queue, so the
 # controller's arithmetic stays `desired == depth` (routing.py, plan P3.2).
 # Defaults on: every VM this script provisions is autoscaled. Set 0 for a
@@ -180,7 +196,28 @@ if ! WORKER_UUID=$(curl -sf --max-time 5 \
   echo "!! metadata service unreachable; falling back to hostname for the queue name"
 fi
 WORKER_QUEUE="${WORKER_QUEUE_OVERRIDE:-sivacor.${WORKER_UUID:-$(hostname -s)}}"
+# Resolved here, not in the header: every branch names WORKER_QUEUE, which does not
+# exist until the line above has run.
+#
+# `private` is spelled as a word rather than as a queue list because the list cannot be
+# written down off-box: the private queue is `sivacor.<this VM's uuid>`, known only
+# here. A deployment that tried to say it literally -- `sivacor.$WORKER_UUID` in .env --
+# would get it verbatim, since the controller shell-quotes injected values, and the
+# worker would subscribe to a queue nothing ever publishes to and sit idle looking
+# healthy. That is the same class of silent failure this variable exists to prevent, so
+# the common case is one unmistakable word and anything else is checked below.
+case "${WORKER_QUEUES}" in
+  "")        WORKER_QUEUES="sivacor,${WORKER_QUEUE}" ;;
+  private)   WORKER_QUEUES="${WORKER_QUEUE}" ;;
+  *)         : ;;   # verbatim, for a hand-made debug worker
+esac
+case ",${WORKER_QUEUES}," in
+  *",${WORKER_QUEUE},"*) : ;;
+  *) echo "!! WORKER_QUEUES (${WORKER_QUEUES}) does not include this VM's own queue"
+     echo "!! ${WORKER_QUEUE} -- nothing the controller assigns to it will be consumed." ;;
+esac
 echo "--- queue: ${WORKER_QUEUE} ---"
+echo "--- subscribing to: ${WORKER_QUEUES} ---"
 
 # ---- env file: docker --env-file format ----------------------------------
 # Bare KEY=VALUE. NO 'export', NO quotes (quotes become part of the value).
@@ -309,7 +346,7 @@ ExecStart=/usr/bin/docker run --rm --name sivacor-worker \\
   -v /home/${DEPLOY_USER}/volumes/tmp:/tmp \\
   ${WORKER_IMAGE} \\
   -- celery --app=girder_worker.app worker \\
-    --queues=sivacor,${WORKER_QUEUE} \\
+    --queues=${WORKER_QUEUES} \\
     --concurrency=1 \\
     --prefetch-multiplier=1 \\
     --loglevel=INFO

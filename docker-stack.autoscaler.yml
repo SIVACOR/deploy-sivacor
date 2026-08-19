@@ -141,6 +141,23 @@ services:
       # user-data, because a worker VM does reach Girder over HTTPS.
       - SIVACOR_GIRDER_HOST=girder.${domain}
       - SIVACOR_WORKER_IMAGE=${SIVACOR_WORKER_IMAGE:-}
+      # What a worker VM's celery subscribes to. Empty leaves worker-cloud-init.sh's
+      # own default, `sivacor,<its private queue>` -- both the shared dispatch queue
+      # and its own, which is what every worker has always done. Set it to the private
+      # word `private` once THIS deployment has armed targeted assignment and nothing
+      # publishes to `sivacor` (worker_sizing_plan.md P2, rollout step 4). A word, not a
+      # queue list: the private queue is `sivacor.<the VM's uuid>` and cannot be named
+      # off-box, so a literal attempt arrives verbatim and the worker consumes nothing.
+      #
+      # A variable rather than an edit to the template because that file is ONE
+      # checkout bind-mounted by the mirror and by production, which are at different
+      # points of that rollout. Narrowing it in the file would take effect on the
+      # flag-off deployment's next pull, whose workers would then consume nothing while
+      # Girder kept publishing -- every submission stranded, fleet reading healthy.
+      #
+      # It also ends the one-flag rollback for this deployment: a worker that has
+      # stopped consuming `sivacor` cannot serve a submission dispatched the old way.
+      - SIVACOR_WORKER_QUEUES=${SIVACOR_WORKER_QUEUES:-}
       - SIVACOR_DISPATCH_QUEUE=${SIVACOR_DISPATCH_QUEUE:-sivacor}
       # Guardrails (D3): cap BELOW the OpenStack quota, since the same 25 instances
       # carry the manager, the test mirror and any hand-made debug VM.
