@@ -129,6 +129,14 @@ services:
       # needed because the chain's steps carry results.
       - GIRDER_WORKER_BROKER=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/
       - GIRDER_WORKER_BACKEND=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/
+      # Creating the head step's child job makes Girder emit a user notification, and
+      # girder.notification defaults to localhost:6379 when this is unset -- so every
+      # assignment logged a ConnectionError traceback before the "published submission"
+      # line (mirror, 2026-08-19). Harmless in itself: the flush is caught, and the
+      # chain still goes out. But it is a traceback per submission in the log an
+      # operator reads to tell a healthy fleet from a sick one, and it silently drops
+      # the researcher's notification for that step.
+      - GIRDER_NOTIFICATION_REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/
       # NOT for this process -- this is the public hostname written into worker
       # user-data, because a worker VM does reach Girder over HTTPS.
       - SIVACOR_GIRDER_HOST=girder.${domain}
