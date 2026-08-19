@@ -119,6 +119,16 @@ services:
       # "housekeeping must stay HTTP" rule does not apply: that is about writes needing
       # `jobs.job.update.after`, which is bound only in the Girder server process.
       - GIRDER_MONGO_URI=mongodb://mongo:27017/girder
+      # ...and, once targeted assignment is armed, this process PUBLISHES: it builds a
+      # submission's celery chain with girder_sivacor's own builder and sends it to the
+      # chosen instance's private queue. That needs the same broker girder and
+      # local_worker use, by the same service name over the `celery` network. Without
+      # these two the claim succeeds and the publish raises -- the submission is bound
+      # to a worker that is never told, and sits until the server-side reaper fails it.
+      # Kombu reads GIRDER_WORKER_BROKER via girder_worker's config; the backend is
+      # needed because the chain's steps carry results.
+      - GIRDER_WORKER_BROKER=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/
+      - GIRDER_WORKER_BACKEND=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/
       # NOT for this process -- this is the public hostname written into worker
       # user-data, because a worker VM does reach Girder over HTTPS.
       - SIVACOR_GIRDER_HOST=girder.${domain}

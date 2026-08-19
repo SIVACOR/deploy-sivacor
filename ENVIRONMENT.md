@@ -337,6 +337,8 @@ and no locking — `replicas: 1` *is* the mutual exclusion.
 | OpenStack | `clouds.yaml` bind-mounted read-only + `OS_CLOUD`. `OS_*` variables work too — openstacksdk reads either — but a bind mount keeps one more credential out of `.env`. |
 | Broker | `SIVACOR_REDIS_URL`, over the `celery` overlay by service name. |
 | Job documents | `GIRDER_MONGO_URI`, over the `mongo` overlay. **No Girder API key.** |
+| Publishing chains | `GIRDER_WORKER_BROKER` + `GIRDER_WORKER_BACKEND`, the same values `girder` and `local_worker` get. Only used once targeted assignment is armed, and then load-bearing: the controller builds the submission's chain itself and publishes it to the chosen instance's private queue. Missing, the claim still succeeds and the publish raises — the submission is bound to a worker that is never told, and waits for the reaper. |
+| Whether it assigns at all | The Girder setting `sivacor.targeted_assignment`, read from Mongo every tick. **Deliberately not an environment variable**: `submit_job` reads the same value to decide whether *it* publishes, and any state where the two disagree is broken — both publishing puts two workers on one workspace, neither means nothing runs while the fleet reads as healthy and idle. One document cannot disagree with itself. Flipping it takes effect within one interval, with no redeploy, and the controller logs the transition. |
 | Worker template | `./worker-cloud-init.sh` bind-mounted read-only. Not baked into the image: it is a deployment artifact that changes far more often than the controller, and two artifacts that must agree is the trap that ruled out a Packer image. |
 | Worker secrets | `MASTER_KEY_HEX` + `REDIS_PASSWORD`, injected into user-data. Must match the manager byte for byte. |
 
