@@ -15,8 +15,27 @@ images:
 	docker pull node:carbon-slim
 	docker pull xarthisius/girder:$(TAG)
 
+# The autoscaler's diagnostics directory is the one bind-mount source that lives
+# OUTSIDE this checkout, so $(SUBDIRS) cannot create it -- and a missing bind source
+# does not degrade the controller, Swarm REJECTS the task outright:
+#
+#   invalid mount config for type "bind": bind source path does not exist
+#
+# The stack then looks healthy except for `wt_autoscaler 0/1`, i.e. a fleet that boots
+# nothing while everything else is green. Found on the test mirror on 2026-08-19, the
+# first rebuild after the controller moved onto this image, and it would recur on every
+# rebuild after that -- the home directory is new each time. The path is read from .env so it tracks whatever docker-stack.autoscaler.yml
+# is given, and defaults to the same value that file does.
+#
+# chown 1000:1000, not `id -u`: the girder-sivacor image runs as uid 1000 (girder)
+# whoever deploys it, and the failure of getting this wrong is the quiet one the
+# compose comment describes -- one warning per reap and an empty directory when someone
+# finally goes looking for a dump.
 dirs: $(SUBDIRS)
 	@touch traefik/acme.json && chmod 600 traefik/acme.json
+	@if [ -f ./.env ]; then . ./.env; fi; \
+	  d="$${SIVACOR_DIAGNOSTICS_HOSTPATH:-/home/ubuntu/sivacor-diagnostics}"; \
+	  sudo mkdir -p "$$d" && sudo chown 1000:1000 "$$d"
 
 $(SUBDIRS):
 	@sudo mkdir -p $@
