@@ -288,6 +288,30 @@ process, and at `-c 4` with a 30-minute threshold re-firing every 10 minutes,
 the sweeps do not need one.
 
 
+## Worker sizes, and who may pick a large one
+
+Two Girder settings, not environment variables, because two processes have to agree
+about them — see `worker_sizing_plan.md` P0.3 and S5.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `sivacor.worker_sizes` | one rung, `60 GB / m3.large / 16 vCPU`, ungated | The catalogue a submission may ask for. Each entry is `{memory_gb, flavor, vcpus, gated}`. `memory_gb` is the value on the wire and in an exported workflow; `flavor` never leaves the server. Read **once at startup** by the controller and validated against Nova, so editing it needs `docker service update --force wt_autoscaler`. |
+| `sivacor.worker_size_group_name` | `Large Workers` | The group whose members may select a `gated` rung. Site admins bypass it. |
+
+**You have to create the group yourself.** Nothing creates it — that is the point of
+using a group, so granting access is an operator action in the Girder UI rather than a
+code change. Until it exists, every gated rung is refused to every non-admin, which is
+the safe direction but is indistinguishable from "you are not a member" to the
+researcher. Girder's log says which it is: grep for `so no user may select a gated
+worker size`.
+
+Adding or removing a catalogue entry is a **compatibility event**: `memory_gb` is an
+enum, so a workflow exported with `memory_gb: 125` fails to import once 125 is
+withdrawn. That is deliberate — the alternative is silently re-mapping a run onto
+hardware it was never tested on — but it means the catalogue is a published contract.
+A submission already waiting for a withdrawn rung is failed promptly, naming the sizes
+that remain, rather than ageing out against `sivacor.assignment_timeout`.
+
 ## The autoscaler
 
 Runs the P3 controller as a stack service instead of a checkout plus a terminal on
