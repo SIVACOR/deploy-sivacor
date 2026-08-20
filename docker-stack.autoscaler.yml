@@ -162,6 +162,20 @@ services:
       # Guardrails (D3): cap BELOW the OpenStack quota, since the same 25 instances
       # carry the manager, the test mirror and any hand-made debug VM.
       - SIVACOR_MAX_INSTANCES=${SIVACOR_MAX_INSTANCES:-5}
+      # The other two quota dimensions (S6, superseding D3 once the fleet is
+      # heterogeneous). Unset = that check does not run, which is right while every
+      # worker is one shape: the instance count binds at the bottom rung and only
+      # there. It stops bounding cost as soon as sizes differ -- at 125 GiB the RAM
+      # quota binds at NINE instances, not 25, and a controller enforcing
+      # SIVACOR_MAX_INSTANCES alone would take a Nova rejection instead, which is
+      # the failure D3 wrote its rule to avoid.
+      #
+      # Cap these below the real quota too, and for the same reason as the instance
+      # count: live quota 2026-08-20 is 320 vCPU / 1220 GiB, of which the two
+      # managers already hold 12 vCPU / 45 GiB. QuotaExceeded stays the outer net;
+      # these only stop it being the first thing that notices.
+      - SIVACOR_MAX_VCPUS=${SIVACOR_MAX_VCPUS:-}
+      - SIVACOR_MAX_RAM_GB=${SIVACOR_MAX_RAM_GB:-}
       # Must stay above the server's sivacor.max_runtime (168h, seeded in
       # setup_girder.py) or this deletes workers the reaper still considers
       # healthy. The 12h of headroom covers boot, a cold image pull (~15 GB for
