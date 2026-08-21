@@ -176,6 +176,17 @@ services:
       # these only stop it being the first thing that notices.
       - SIVACOR_MAX_VCPUS=${SIVACOR_MAX_VCPUS:-}
       - SIVACOR_MAX_RAM_GB=${SIVACOR_MAX_RAM_GB:-}
+      # Scratch volume per worker, in GB. Empty = no volume, and no Cinder call is
+      # ever made -- the pre-C2 behaviour. This is only the SIZE; whether volumes are
+      # created at all is the Girder setting sivacor.volumes_enabled, read per tick,
+      # because submit_job and this controller both have to agree about it.
+      #
+      # A THIRD quota dimension, and the tightest: 10 volumes / 2000 GB for the
+      # project, of which production's 800 GB assetstore volume and the mirror's
+      # 200 GB are permanent. So the fleet has 8 volumes and 1000 GB; with
+      # SIVACOR_MAX_INSTANCES=5 the volume COUNT binds first, leaving three spare as
+      # the whole margin for a leak.
+      - SIVACOR_VOLUME_SIZE_GB=${SIVACOR_VOLUME_SIZE_GB:-}
       # Must stay above the server's sivacor.max_runtime (168h, seeded in
       # setup_girder.py) or this deletes workers the reaper still considers
       # healthy. The 12h of headroom covers boot, a cold image pull (~15 GB for

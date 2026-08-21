@@ -16,10 +16,15 @@
 # present in the JS2 base image, docker GID 112, 52 GB free after both pulls.
 
 # SIZE BUDGET -- THIS FILE IS user_data. Nova rejects it over 65535 bytes *base64*,
-# and the autoscaler injects ~480 more on top. Comments cost real bytes here, unlike
+# and the autoscaler injects ~500 more on top. Comments cost real bytes here, unlike
 # anywhere else in this workspace: on 2026-08-12 a comment-heavy commit put it 65
-# bytes over and NO worker could be created until it was trimmed. Check before
-# pushing:  base64 -w0 worker-cloud-init.sh | wc -c
+# bytes over and NO worker could be created until it was trimmed.
+#
+# The autoscaler now gzips this UNCONDITIONALLY before encoding, so the number that
+# matters is the compressed one -- the raw base64 has been over 65535 since the C2
+# volume block landed, and that is fine. Check before pushing:
+#   gzip -c worker-cloud-init.sh | base64 -w0 | wc -c     # ~27000, limit 65535
+# The raw figure is no longer the budget; measuring it will scare you for nothing.
 # Long-form rationale belongs in development_notes/, which this file points at.
 
 set -euo pipefail
@@ -176,6 +181,48 @@ install -d -o "$DEPLOY_UID" -g "$DEPLOY_GID" -m 755  /home/"$DEPLOY_USER"/volume
 install -d -o "$DEPLOY_UID" -g "$DEPLOY_GID" -m 1777 /home/"$DEPLOY_USER"/volumes/tmp
 install -d -o "$DEPLOY_UID" -g "$DEPLOY_GID" -m 755  /home/"$DEPLOY_USER"/volumes/licenses
 install -d -m 755 /etc/sivacor
+
+# ---- scratch volume, if the controller attached one (C2) -----------------
+# Empty SIVACOR_VOLUME_ID is fully supported and is the default: everything below
+# is skipped and the workspace stays on the root disk.
+#
+# Mounted at volumes/tmp because that is the worker container's /tmp, where both
+# workspace_dir and tmp_dir live (lib.py) -- so all three of the disk peaks land
+# on the volume and NOTHING in girder-sivacor changes. It also hands the image
+# pull back the whole root disk, which is the failure this exists to fix.
+#
+# The device handle is measured, not guessed: JS2 is SCSI, there is no
+# /dev/disk/by-id/virtio-* link at all, and the serial carries the FULL volume
+# uuid untruncated (verified on a live probe 2026-08-21). So the path is
+# constructible from the id and needs no lsblk parsing.
+if [ -n "${SIVACOR_VOLUME_ID:-}" ]; then
+  VOL_DEV="/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_${SIVACOR_VOLUME_ID}"
+  echo "--- waiting for scratch volume ${SIVACOR_VOLUME_ID} at ${VOL_DEV} ---"
+  # NO FALLBACK, deliberately. Guessing /dev/sdb when the constructed path is
+  # absent is how you mkfs the root disk. Failing loudly here costs one instance;
+  # the controller reaps it and the submission is retried elsewhere.
+  for _ in $(seq 1 60); do [ -e "$VOL_DEV" ] && break; sleep 1; done
+  if [ ! -e "$VOL_DEV" ]; then
+    echo "!! scratch volume never appeared at ${VOL_DEV}; refusing to guess a device"
+    exit 1
+  fi
+  # blkid exits non-zero with no output on an unformatted device, which is the
+  # clean signal for "mkfs only if needed" -- and makes re-running this safe.
+  if ! blkid "$VOL_DEV" >/dev/null 2>&1; then
+    echo "--- formatting ${VOL_DEV} ---"
+    # nodiscard: the volume is minutes old and thrown away at reap, so trimming
+    # a fresh one costs minutes on a large disk and buys nothing.
+    mkfs.ext4 -q -E nodiscard -L sivacor-scratch "$VOL_DEV"
+  fi
+  mount "$VOL_DEV" /home/"$DEPLOY_USER"/volumes/tmp
+  # AFTER the mount, and load-bearing: `install -d` above set the mode on the
+  # DIRECTORY, and mounting exposes the filesystem's own root (root:root 0755)
+  # over it. Without this the worker container -- which runs as a non-root uid --
+  # cannot write /tmp, and EVERY submission on this instance fails.
+  chown "$DEPLOY_UID":"$DEPLOY_GID" /home/"$DEPLOY_USER"/volumes/tmp
+  chmod 1777 /home/"$DEPLOY_USER"/volumes/tmp
+  df -h /home/"$DEPLOY_USER"/volumes/tmp | tail -1
+fi
 
 # ---- pin Girder to the tenant address ------------------------------------
 grep -q "[[:space:]]${GIRDER_HOST}\$" /etc/hosts || \
