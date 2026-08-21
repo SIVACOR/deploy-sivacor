@@ -371,6 +371,38 @@ the value a researcher would get.
 ceiling, so a 195 GB ceiling grants at most 190. Rounding first is deliberate —
 checking first would let a request slip past the ceiling it was checked against.
 
+### Fleet-side variables
+
+| Variable | Default | What it does |
+|---|---|---|
+| `SIVACOR_MAX_VOLUMES` | unset (off) | Cinder volumes this fleet may hold at once. A **third** headroom dimension after S6's vCPU and RAM. |
+| `SIVACOR_MAX_VOLUME_GB` | unset (off) | Gigabytes it may hold. The **fourth**. |
+| `SIVACOR_VOLUME_SIZE_GB` | unset | **Inert since C3.** Was the fixed size every worker got; the size now comes from each submission. Logged as a warning if set — remove it. |
+
+**Set both below the real quota, and know what shares it.** Read live 2026-08-21: 10
+volumes / 2000 GB for the project, of which **two volumes and 1000 GB are permanent** —
+production's `sivacor` volume is 800 GB and holds the filesystem assetstore, the
+mirror's `docker` is 200 GB. So the fleet has 8 volumes and 1000 GB, and with
+`SIVACOR_MAX_INSTANCES=5` the **count** binds first, leaving three spare as the whole
+margin for a leak. Deriving these from the quota would collide with the assetstore's
+ability to grow.
+
+```sh
+openstack quota show --volume    # limits
+openstack volume list --long     # what is spent, and on what
+```
+
+**Volumes require targeted assignment.** The size comes from the submission, and demand
+read from queue *depth* has no submission behind it — so on an unarmed deployment no
+volume is ever created, whatever a submission asked for. Arm
+`sivacor.targeted_assignment` before enabling volumes, or a researcher's request is
+accepted and silently not honoured.
+
+**A quota stop names which limit stopped it.** `volumes N+1 > M` or
+`volume GB N+D > M`, never `max_instances` — the misattribution fixed on 2026-08-20 in
+its original two dimensions. It is head-of-line by design (S7): a submission that does
+not fit holds the line rather than being skipped, because skipping starves it.
+
 ## The autoscaler
 
 Runs the P3 controller as a stack service instead of a checkout plus a terminal on
