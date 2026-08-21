@@ -312,6 +312,65 @@ hardware it was never tested on — but it means the catalogue is a published co
 A submission already waiting for a withdrawn rung is failed promptly, naming the sizes
 that remain, rather than ageing out against `sivacor.assignment_timeout`.
 
+## Extra scratch disk (Cinder volumes) — approval is per user
+
+Two Girder settings and one **per-user field**, not environment variables. Design and
+rationale: `cinder_volumes_plan.md` V1/V3/V8.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `sivacor.volumes_enabled` | `false` | Master switch. With it off, a submission asking for `resources.disk_gb` is refused at submit time and one that does not ask is unaffected. Must be a real boolean — `"false"` is truthy, and the validator rejects a string for that reason. |
+| `sivacor.volume_total_gb` | `0` | Gigabytes this deployment may spend on scratch volumes. **Set it well below the real quota** — see below. In C1 this bounds a single request; fleet-wide accounting against it is C3. |
+
+**Both default off, and that is two separate acts.** Flipping the switch without
+funding it refuses every request with a *capacity* message rather than silently
+spending quota. "Not turned on" and "turned on and budgeted nothing" are different
+states and read differently to the researcher.
+
+**Know what the quota is shared with before setting `volume_total_gb`.** Read live
+2026-08-21: the project has **10 volumes / 2000 GB**, of which **2 volumes and 1000 GB
+are permanently spoken for** — production's `sivacor` volume is **800 GB and holds the
+filesystem assetstore**, and the test mirror's `docker` volume is 200 GB. So the whole
+feature has **8 volumes and 1000 GB**, and those gigabytes are the same ones production
+would need to grow its assetstore. Deriving this setting from the quota guarantees a
+collision with that. The **volume count** is the tighter of the two limits: with
+`SIVACOR_MAX_INSTANCES=5`, five concurrent volumes fit inside 8 with three to spare, and
+three is the entire margin for a leak.
+
+```sh
+openstack quota show --volume      # limits
+openstack volume list --long       # what is already spent, and on what
+```
+
+**Approving a user is a REST call, and it is the only way.** The ceiling lives on the
+user document (`sivacorMaxVolumeGb`); absent or `0` means not approved, which is every
+account until you say otherwise. There is no Girder UI for it, and nothing else grants
+it.
+
+```sh
+# grant 200 GB
+curl -s -X PUT -H "Girder-Token: $TOKEN" \
+  "$API/sivacor/user/<userId>/volume_quota?maxGb=200"
+# revoke
+curl -s -X PUT -H "Girder-Token: $TOKEN" \
+  "$API/sivacor/user/<userId>/volume_quota?maxGb=0"
+# what does a caller see for themselves?
+curl -s -H "Girder-Token: $TOKEN" "$API/sivacor/volume_quota"
+```
+
+**A field rather than a group, unlike the worker-size gate**, because a group has no
+per-member payload and the requirement here is a per-user *number* — "Alice may have
+200 GB, Bob 50" is not expressible as membership.
+
+**Site admins are NOT exempt here**, which is the opposite of `sivacor.worker_sizes`'
+group gate. An admin who wants a volume sets their own field: the same operator action,
+with the same record of what was granted, and it means the value an admin tests with is
+the value a researcher would get.
+
+**A request is rounded up to a multiple of 10 GB** before it is checked against the
+ceiling, so a 195 GB ceiling grants at most 190. Rounding first is deliberate —
+checking first would let a request slip past the ceiling it was checked against.
+
 ## The autoscaler
 
 Runs the P3 controller as a stack service instead of a checkout plus a terminal on
