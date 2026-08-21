@@ -187,6 +187,14 @@ services:
       # SIVACOR_MAX_INSTANCES=5 the volume COUNT binds first, leaving three spare as
       # the whole margin for a leak.
       - SIVACOR_VOLUME_SIZE_GB=${SIVACOR_VOLUME_SIZE_GB:-}
+      # Cinder headroom, C3. Empty = that check is off. A THIRD and FOURTH dimension
+      # after S6's vCPU/RAM, and the tightest pair: the project has 10 volumes /
+      # 2000 GB, of which two volumes and 1000 GB are the two deployments' own data
+      # volumes -- production's 800 GB one holds the assetstore. So the fleet has 8
+      # volumes and 1000 GB. Set these BELOW that, for the same reason the other four
+      # are below the compute quota.
+      - SIVACOR_MAX_VOLUMES=${SIVACOR_MAX_VOLUMES:-}
+      - SIVACOR_MAX_VOLUME_GB=${SIVACOR_MAX_VOLUME_GB:-}
       # Must stay above the server's sivacor.max_runtime (168h, seeded in
       # setup_girder.py) or this deletes workers the reaper still considers
       # healthy. The 12h of headroom covers boot, a cold image pull (~15 GB for
