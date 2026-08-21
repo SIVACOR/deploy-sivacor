@@ -377,6 +377,7 @@ checking first would let a request slip past the ceiling it was checked against.
 |---|---|---|
 | `SIVACOR_MAX_VOLUMES` | unset (off) | Cinder volumes this fleet may hold at once. A **third** headroom dimension after S6's vCPU and RAM. |
 | `SIVACOR_MAX_VOLUME_GB` | unset (off) | Gigabytes it may hold. The **fourth**. |
+| `SIVACOR_VOLUME_ORPHAN_GRACE_MINUTES` | unset (**off**) | How long an *unattached* volume of ours may exist before the sweep reclaims it. **Off means nothing looks for a leak.** |
 | `SIVACOR_VOLUME_SIZE_GB` | unset | **Inert since C3.** Was the fixed size every worker got; the size now comes from each submission. Logged as a warning if set — remove it. |
 
 **Set both below the real quota, and know what shares it.** Read live 2026-08-21: 10
@@ -397,6 +398,25 @@ read from queue *depth* has no submission behind it — so on an unarmed deploym
 volume is ever created, whatever a submission asked for. Arm
 `sivacor.targeted_assignment` before enabling volumes, or a researcher's request is
 accepted and silently not honoured.
+
+**Turn the orphan sweep on, and set the grace in minutes.** It is the only thing that
+notices a volume nothing is using. Since C2 the reap path deliberately does **not** try
+to delete an attached volume — Nova refuses the detach while the server is in
+`task_state deleting`, Cinder refuses to delete an attached volume, and attempting it
+produced a `holds quota until reclaimed by hand` warning on *every* reap for a volume
+Nova removed seconds later. `delete_on_termination` reclaims those, and is measured
+doing so. The sweep is what catches the case where it does not.
+
+**The grace is correctness, not politeness.** The create path makes the volume *before*
+the instance — it has to, because the boot block needs the volume id in its user-data —
+so every healthy volume is briefly unattached. Measured on the mirror: created 16:39:21,
+attached by 16:40:02. A grace shorter than a boot would delete volumes that are about to
+be used. **15 minutes** is a sane starting point: comfortably clear of a boot, and well
+inside the eight-volume count quota.
+
+Each reclaim is logged as a **warning**, not an info line, and names
+`delete_on_termination` — because every one of them is either a leak that happened or the
+bug that caused one, and a silent sweep is indistinguishable from a leak nobody noticed.
 
 **A quota stop names which limit stopped it.** `volumes N+1 > M` or
 `volume GB N+D > M`, never `max_instances` — the misattribution fixed on 2026-08-20 in

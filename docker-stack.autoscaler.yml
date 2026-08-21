@@ -195,6 +195,12 @@ services:
       # are below the compute quota.
       - SIVACOR_MAX_VOLUMES=${SIVACOR_MAX_VOLUMES:-}
       - SIVACOR_MAX_VOLUME_GB=${SIVACOR_MAX_VOLUME_GB:-}
+      # C5.1's orphan sweep: an unattached volume of ours older than this is reclaimed.
+      # Empty = OFF, and off means NOTHING looks for a volume orphaned by a
+      # delete_on_termination that did not fire -- since C2 the reap path deliberately
+      # does not check, because attempting it produced a false leak alarm on every reap.
+      # Minutes, not hours: this project has 10 volumes in total.
+      - SIVACOR_VOLUME_ORPHAN_GRACE_MINUTES=${SIVACOR_VOLUME_ORPHAN_GRACE_MINUTES:-}
       # Must stay above the server's sivacor.max_runtime (168h, seeded in
       # setup_girder.py) or this deletes workers the reaper still considers
       # healthy. The 12h of headroom covers boot, a cold image pull (~15 GB for
