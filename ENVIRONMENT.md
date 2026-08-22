@@ -69,6 +69,17 @@ existing `.env` needs none of them.
 | `SIVACOR_OS_IMAGE` / `SIVACOR_OS_FLAVOR` / `SIVACOR_OS_NETWORK` / `SIVACOR_OS_SECGROUPS` | `Featured-Ubuntu24` / `m3.medium` / `auto_allocated_network` / none | Worker instance shape. **`m3.medium` is a floor, and not for CPU**: JS2 gives 20 GB of root disk to `m3.tiny`/`small`/`quad` and 60 GB to everything above, and analysis images are pulled at run time. Larger flavors buy CPU and RAM, never disk. |
 | `SIVACOR_WORKER_IMAGE` | **derived from `GIRDER_SIVACOR_IMAGE`** | The image worker VMs boot, injected into user-data. **Do not set it in `.env`.** It is the *same* image as the manager's — one `girder-sivacor` build serves `girder`, `beat`, `local_worker` and every VM — so the Makefile derives it, and two independently-set variables holding one value would just be a way to get manager/worker version skew silently. Set it only to test a new worker image against the current manager, and remember to remove it. |
 | `SIVACOR_REDIS_URL` | `redis://:$REDIS_PASSWORD@redis:6379/` (set in the stack) | How the **controller** reaches the broker. Distinct from `SIVACOR_MANAGER_TENANT_IP`, which is how **workers** reach it. |
+| `SIVACOR_DISPATCH_QUEUE` | `sivacor` (set in the stack) | Name of the shared dispatch queue. **Read independently by the plugin and the controller**, so it is the same two-processes-must-agree hazard as `sivacor.targeted_assignment`: change it in one place and Girder publishes where nothing consumes, or the controller measures a queue nobody uses — both of which look like a healthy idle fleet. Leave it alone unless you are renaming the queue everywhere at once. |
+| `SIVACOR_GIRDER_HOST` | `girder.$domain` (set in the stack) | Host the controller writes into worker user-data so a VM can reach Girder. Derived from `domain`; set it only when the API is served from somewhere else. |
+| `SIVACOR_WORKER_TEMPLATE` | `/etc/sivacor/worker-cloud-init.sh` (set in the stack) | Path *inside the controller container* to the cloud-init template, bind-mounted from the checkout. **Required** — the controller refuses to start without it. Remember what the bind mount means: **one checkout serves both deployments**, so editing the template to change per-deployment behaviour reaches production on its next worker boot. That is why queue narrowing is a variable and not an edit. |
+| `SIVACOR_EPHEMERAL_WORKER` | unset on the manager; `1` on a fleet VM | Makes a worker serve exactly one submission and exit. **Never set it on the manager** — `local_worker` is long-lived and must keep consuming. Set by cloud-init on autoscaled instances, not by you. Truthiness here is a real allow-list (`1`/`true`/`yes`), unlike `GIRDER_EMAIL_TO_CONSOLE`'s bare check, so `false` is correctly false. |
+
+**One variable that looks missing and is not:** `SIVACOR_VOLUME_ID`. The controller injects it
+per instance when that submission was granted a scratch volume, and cloud-init builds the
+device path from it (`/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_<id>`). **Empty is the
+supported default** and is what every ordinary worker gets — the whole volume block in
+`worker-cloud-init.sh` is inert without it. Setting it in `.env` would pin every worker in
+the fleet to one volume; there is no case for that.
 
 ## Host rules and TLS
 
@@ -288,6 +299,86 @@ process, and at `-c 4` with a 30-minute threshold re-firing every 10 minutes,
 the sweeps do not need one.
 
 
+## Girder settings — the other plane, and the whole list
+
+**This file is a `.env` reference, and `.env` is only half of the configuration.** Nineteen
+`sivacor.*` settings live in **MongoDB**, not in the environment, and the two planes behave
+differently in the way that matters most: a `.env` change needs `make dev`, while almost
+every setting below is read **per request or per controller tick**, so it takes effect
+without a restart. The sections after this one cover the settings a *feature* introduced;
+this is the complete list, so nothing is only documented in a plan.
+
+**Values below are production's, read live 2026-08-22**, with the code default in brackets
+where it differs (`girder_sivacor/settings.py` is the authority for defaults).
+
+| Setting | Production | Effect |
+|---|---|---|
+| `sivacor.retention_days` | **14** [7] | Days before a submission folder **and its job** are deleted. **Also the window `/sivacor/volume_usage` can see** — shortening it silently shortens the accounting history. |
+| `sivacor.max_runtime` | **168** h [24] | A run is stopped after this. Must stay *below* `SIVACOR_MAX_LIFETIME_HOURS` (180) or the VM is deleted under a live run. |
+| `sivacor.heartbeat_timeout` | 30 min | No activity for this long ⇒ `reaped_no_heartbeat`. Generous on purpose: only the container run ticks it, so quiet stretches are whole pipeline steps. |
+| `sivacor.assignment_timeout` | 60 min | Only meaningful under targeted assignment: how long a submission may wait for an instance before failing as `reaped_no_worker`. |
+| `sivacor.targeted_assignment` | **true** | Whether the controller places submissions instead of publishing to the shared queue. **One setting because two processes must agree.** Disarming is no longer safe here — see *Queues*. |
+| `sivacor.worker_sizes` | 30/60 self-service, 125/250 gated | The size catalogue. See *Worker sizes* below. |
+| `sivacor.worker_size_group_name` | `Large Workers` | Group whose members may pick a gated rung. Admins bypass. |
+| `sivacor.volumes_enabled` | **true** | Scratch-volume master switch. See *Extra scratch disk*. |
+| `sivacor.volume_total_gb` | **100** | Bounds a **single** request. See *Extra scratch disk*. |
+| `sivacor.banner_enabled` | false | Shows `banner_message` across the UI. |
+| `sivacor.banner_message` | *(a maintenance notice from August 4–5)* | **Read it before enabling.** The message persists after the banner is switched off, so flipping `banner_enabled` on republishes whatever was last written — currently a notice weeks out of date. Clear it when you disable it, not when you next need it. |
+| `sivacor.image_tags` | 10 repos | Allow-list cache, refreshed every 4 h from `sivacor-repo-choice`. Hand-editing is overwritten. |
+| `sivacor.tro_gpg_fingerprint` | set | TRS signing key. Seeded from `.env` **on first setup only** — see *Required*. |
+| `sivacor.tro_gpg_passphrase` | set | Same. Never log it. |
+| `sivacor.tro_profile` | 7 fields | The TRS certificate: capabilities, owner, contact. Edit only alongside `trace-specification` — capabilities here back every claim in a signed TRO. |
+| `sivacor.stata_license` | set | Contents of `stata.lic`, fetched at run time by the step that needs it. Empty ⇒ Stata images cannot run. Seeded from `STATA_LICENSE_HOSTPATH` on first setup only. |
+| `sivacor.editors_group_name` | `Editors` | Group with editor privileges. |
+| `sivacor.uploads_folder_name` | `Uploads` | Per-user upload folder name. |
+| `sivacor.submission_collection_name` | `Submissions` | Collection holding submission folders. Renaming it orphans every existing submission. |
+
+**Read and write them with query parameters, never a body.**
+
+```sh
+API=https://girder.$domain/api/v1
+get()  { curl -s -H "Girder-Token: $TOKEN" "$API/system/setting?key=$1"; }
+set_() { curl -s -X PUT -H "Girder-Token: $TOKEN" -G \
+           --data-urlencode "key=$1" --data-urlencode "value=$2" "$API/system/setting"; }
+```
+
+**A urlencoded body returns 200 having changed nothing.** This has cost a whole end-to-end
+run twice. Always read back what you wrote, and note booleans must be real JSON (`true`,
+not `"true"` — a truthy string arms a path the validator is trying to protect).
+
+**`setup_girder.py` will not update any of these on an existing deployment.** It exits at
+its admin-user check on a database that already has an admin, printing *"You should be all
+set!!"* while changing nothing. So the `.env` variables that *seed* settings —
+`GIRDER_SIVACOR_TRO_GPG_*`, `STATA_LICENSE_HOSTPATH` — are first-time-only, and every later
+change goes through the API or the admin UI.
+
+### Girder *core* settings, set from the environment
+
+Distinct from the above: `docker-stack.yml` sets a handful of Girder **core** settings via
+`GIRDER_SETTING_<KEY>` environment variables, which Girder reads at startup. They are not
+`sivacor.*`, they are not in the table above, and they are how mail gets out — the channel
+that tells a researcher their run finished.
+
+Written out in full rather than abbreviated, so grepping for the name you see in
+`docker-stack.yml` finds it here.
+
+| Variable | Fed from | Purpose |
+|---|---|---|
+| `GIRDER_SETTING_CORE_SMTP_HOST` | `.env` | Mail relay (`mail.spacemail.com`). |
+| `GIRDER_SETTING_CORE_SMTP_PORT` | stack file | Relay port. |
+| `GIRDER_SETTING_CORE_SMTP_USERNAME` | `GIRDER_SMTP_USERNAME` | Relay credential. |
+| `GIRDER_SETTING_CORE_SMTP_PASSWORD` | `GIRDER_SMTP_PASSWORD` | Relay credential. **Secret** — it is in the service definition, so `docker service inspect` prints it. |
+| `GIRDER_SETTING_CORE_SMTP_ENCRYPTION` | stack file | TLS/SSL/none. Blank credentials plus `GIRDER_EMAIL_TO_CONSOLE` is the test-stack combination. |
+| `GIRDER_SETTING_CORE_EMAIL_FROM_ADDRESS` | `GIRDER_ADMIN_EMAIL` | Envelope sender. Must be a mailbox the SMTP account may send as. |
+| `GIRDER_SETTING_CORE_CONTACT_EMAIL_ADDRESS` | `GIRDER_ADMIN_EMAIL` | The address users are told to write to. |
+| `GIRDER_SETTING_CORE_EMAIL_HOST` | `https://girder.$domain` | **Base URL Girder puts in the links it mails** — password resets, verification. Wrong here means mail that arrives and cannot be acted on, which no test of *sending* catches. |
+| `GIRDER_SETTING_CORE_REGISTRATION_POLICY` | stack file | Whether accounts self-register. Changing it changes who can reach the platform at all. |
+| `GIRDER_SETTING_USER_QUOTA_DEFAULT_USER_QUOTA` | stack file | Per-user storage ceiling (docs say 10 GB). Unrelated to `sivacor.volume_total_gb`: this is the assetstore, that is scratch disk. |
+| `GIRDER_LOCAL_FONTELLO_ARCHIVE` | stack file | Path to a vendored icon-font archive so the web client build does not fetch `fontello.com`. Infrastructure, not policy — leave it. It is listed here only so that finding it in the stack file does not send you looking for a setting it isn't. |
+
+Because these are read at startup, changing one **does** need a redeploy — the opposite of
+the `sivacor.*` plane above, which is the distinction worth keeping straight.
+
 ## Worker sizes, and who may pick a large one
 
 Two Girder settings, not environment variables, because two processes have to agree
@@ -370,6 +461,30 @@ the value a researcher would get.
 **A request is rounded up to a multiple of 10 GB** before it is checked against the
 ceiling, so a 195 GB ceiling grants at most 190. Rounding first is deliberate —
 checking first would let a request slip past the ceiling it was checked against.
+
+**Before granting a ceiling, read what the existing ones cost** (C5.2, live since
+2026-08-22):
+
+```sh
+curl -s -H "Girder-Token: $TOKEN" "$API/sivacor/volume_usage" \
+  | jq '.totals, (.users[] | {login, ceiling_gb, gb_hours, live_gb, submissions})'
+```
+
+Admin-only, and **derived rather than stored**: it reads job documents, so it reaches back
+exactly as far as `sivacor.retention_days` and no further. Two readings that will otherwise
+mislead you:
+
+- **`gb_hours: 0` means *nothing retained*, not *nothing spent*.** A deleted submission takes
+  its spend with it. The first production reading showed 0 across both approved accounts
+  while a 20 GB volume had demonstrably run — that submission had been deleted.
+- **Rows with zeroes are the point, not noise.** An approved account that has never used its
+  allowance still holds it against the quota, and omitting it is how a second grant gets
+  approved over the top of a first. The first reading of this endpoint found an approved
+  account no document had recorded.
+
+`gb_hours` brackets the *submission*, not the volume: the volume is created moments before
+its instance and destroyed at the **reap**, up to ~20 min after the run ends. Good to within
+a reap tail — a budget figure, not a billing record.
 
 ### Fleet-side variables
 
