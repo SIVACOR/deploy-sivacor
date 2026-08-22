@@ -323,7 +323,7 @@ where it differs (`girder_sivacor/settings.py` is the authority for defaults).
 | `sivacor.volumes_enabled` | **true** | Scratch-volume master switch. See *Extra scratch disk*. |
 | `sivacor.volume_total_gb` | **100** | Bounds a **single** request. See *Extra scratch disk*. |
 | `sivacor.banner_enabled` | false | Shows `banner_message` across the UI. |
-| `sivacor.banner_message` | *(a maintenance notice from August 4–5)* | **Read it before enabling.** The message persists after the banner is switched off, so flipping `banner_enabled` on republishes whatever was last written — currently a notice weeks out of date. Clear it when you disable it, not when you next need it. |
+| `sivacor.banner_message` | `""` (cleared 2026-08-22) | **Read it before enabling.** The message persists after the banner is switched off, so flipping `banner_enabled` on republishes whatever was last written. It held an August 4–5 maintenance notice for two weeks after that window passed, invisible only because the banner was off. Clear it when you disable it, not when you next need it. |
 | `sivacor.image_tags` | 10 repos | Allow-list cache, refreshed every 4 h from `sivacor-repo-choice`. Hand-editing is overwritten. |
 | `sivacor.tro_gpg_fingerprint` | set | TRS signing key. Seeded from `.env` **on first setup only** — see *Required*. |
 | `sivacor.tro_gpg_passphrase` | set | Same. Never log it. |
@@ -345,6 +345,24 @@ set_() { curl -s -X PUT -H "Girder-Token: $TOKEN" -G \
 **A urlencoded body returns 200 having changed nothing.** This has cost a whole end-to-end
 run twice. Always read back what you wrote, and note booleans must be real JSON (`true`,
 not `"true"` — a truthy string arms a path the validator is trying to protect).
+
+**On the manager, `girder-shell` is the better route** — no token, no URL encoding, and the
+body-versus-query-parameter trap cannot happen because there is no request:
+
+```sh
+docker exec -ti $(docker ps --filter=name=wt_girder -q) girder-shell
+```
+```python
+from girder.models.setting import Setting
+Setting().get("sivacor.banner_message")
+Setting().set("sivacor.banner_message", "")   # returns the stored document
+```
+
+`set()` returns the document it wrote, so its output **is** the read-back — one step rather
+than two, and it types the value the way Python does, so `""` is an empty string and `False`
+is a boolean with no JSON round-trip to get wrong. It also bypasses the validators only in
+the sense that it calls them directly; a bad value still raises. Use the REST route from off
+the box, this one from on it.
 
 **`setup_girder.py` will not update any of these on an existing deployment.** It exits at
 its admin-user check on a database that already has an admin, printing *"You should be all
