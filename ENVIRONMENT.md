@@ -75,8 +75,13 @@ existing `.env` needs none of them.
 | `SIVACOR_EPHEMERAL_WORKER` | unset on the manager; `1` on a fleet VM | Makes a worker serve exactly one submission and exit. **Never set it on the manager** — `local_worker` is long-lived and must keep consuming. Set by cloud-init on autoscaled instances, not by you. Truthiness here is a real allow-list (`1`/`true`/`yes`), unlike `GIRDER_EMAIL_TO_CONSOLE`'s bare check, so `false` is correctly false. |
 
 **One variable that looks missing and is not:** `SIVACOR_VOLUME_ID`. The controller injects it
-per instance when that submission was granted a scratch volume, and cloud-init builds the
-device path from it (`/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_<id>`). **Empty is the
+per instance when that submission was granted a scratch volume, and cloud-init resolves the
+device from it **by matching disk serials**, not by constructing one path -- it used to build
+`/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_<id>`, which broke on 2026-09-04 when
+`SIVACOR_OS_IMAGE` moved to a vanilla Ubuntu cloud image: no `hw_disk_bus` property means Nova
+defaults to virtio, and the link is then `virtio-<first 20 chars of the id>`. **The disk bus is a
+property of whatever image you name here**, so neither bus nor a full-length serial may be
+assumed. **Empty is the
 supported default** and is what every ordinary worker gets — the whole volume block in
 `worker-cloud-init.sh` is inert without it. Setting it in `.env` would pin every worker in
 the fleet to one volume; there is no case for that.

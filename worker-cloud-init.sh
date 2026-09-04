@@ -175,6 +175,15 @@ systemctl enable --now docker
 usermod -aG docker "$DEPLOY_USER"
 DOCKER_GID="$(getent group docker | cut -d: -f3)"
 echo "--- docker GID: ${DOCKER_GID} ---"
+# Version and image store, in the console log, because IMAGE_ON_DISK_MULTIPLIER
+# (girder-sivacor) is calibrated against docker.io 29's *containerd* store, which
+# keeps blobs AND a snapshot per layer -- 3.41x compressed, measured on dynare.
+# `docker.io` here is unpinned, and the store is reported as `overlayfs` for the
+# containerd snapshotter vs `overlay2` for the classic graphdriver. If either
+# number moves, the disk precheck is calibrated for a machine that no longer
+# exists and will refuse packages that would fit. Cheaper to log than to rediscover.
+echo "--- docker: $(docker version --format '{{.Server.Version}}' 2>/dev/null || echo unknown)" \
+     "store $(docker info --format '{{.Driver}}' 2>/dev/null || echo unknown) ---"
 
 # ---- directories ---------------------------------------------------------
 install -d -o "$DEPLOY_UID" -g "$DEPLOY_GID" -m 755  /home/"$DEPLOY_USER"/volumes
@@ -191,21 +200,57 @@ install -d -m 755 /etc/sivacor
 # on the volume and NOTHING in girder-sivacor changes. It also hands the image
 # pull back the whole root disk, which is the failure this exists to fix.
 #
-# The device handle is measured, not guessed: JS2 is SCSI, there is no
-# /dev/disk/by-id/virtio-* link at all, and the serial carries the FULL volume
-# uuid untruncated (verified on a live probe 2026-08-21). So the path is
-# constructible from the id and needs no lsblk parsing.
+# The device handle is resolved by SERIAL, never by device name and never by
+# assuming a bus. This used to construct one SCSI path, because the C0.2 probe
+# (2026-08-21) measured JS2 as SCSI with the FULL uuid in the serial and no
+# /dev/disk/by-id/virtio-* link at all. That measurement was true of the JS2
+# image and is NOT a property of JS2: on 2026-09-04 production moved to a
+# vanilla Ubuntu cloud image, which carries no hw_disk_bus, so Nova defaulted to
+# virtio -- disks came up vda/vdb and the one by-id link was
+# `virtio-92efe94b-2eb5-43a7-a`, i.e. the 20-byte serial truncation the probe had
+# concluded did not apply. The bus belongs to whatever image SIVACOR_OS_IMAGE
+# names, so it is not ours to pin; the serial identifies the volume either way.
 if [ -n "${SIVACOR_VOLUME_ID:-}" ]; then
-  VOL_DEV="/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_${SIVACOR_VOLUME_ID}"
-  echo "--- waiting for scratch volume ${SIVACOR_VOLUME_ID} at ${VOL_DEV} ---"
-  # NO FALLBACK, deliberately. Guessing /dev/sdb when the constructed path is
-  # absent is how you mkfs the root disk. Failing loudly here costs one instance;
-  # the controller reaps it and the submission is retried elsewhere.
-  for _ in $(seq 1 60); do [ -e "$VOL_DEV" ] && break; sleep 1; done
-  if [ ! -e "$VOL_DEV" ]; then
-    echo "!! scratch volume never appeared at ${VOL_DEV}; refusing to guess a device"
+  # STILL NO FALLBACK TO A DEVICE NAME, deliberately -- guessing /dev/sdb or
+  # /dev/vdb when nothing matches is how you mkfs the root disk. Both lookups
+  # below prove a serial belongs to THIS volume before naming a device, so
+  # neither can select the root disk: its serial is either absent (local image
+  # disk) or another uuid, and >=20 chars of a uuid cannot collide. A partition
+  # link (`...-part1`) fails the same prefix test, so partitions are excluded
+  # without a special case.
+  scratch_dev() {
+    local link serial name
+    for link in /dev/disk/by-id/*; do
+      [ -e "$link" ] || continue
+      serial=${link##*/}
+      case "$serial" in
+        virtio-*)                      serial=${serial#virtio-} ;;
+        scsi-[0S]QEMU_QEMU_HARDDISK_*) serial=${serial#scsi-?QEMU_QEMU_HARDDISK_} ;;
+        *) continue ;;
+      esac
+      [ ${#serial} -ge 20 ] || continue
+      case "$SIVACOR_VOLUME_ID" in "$serial"*) printf '%s\n' "$link"; return 0 ;; esac
+    done
+    # Second lookup, for a bus whose by-id prefix is not one of the two above:
+    # the kernel's own serial, which is bus-independent. Same matching rule.
+    while read -r name serial; do
+      [ -n "$serial" ] && [ ${#serial} -ge 20 ] || continue
+      case "$SIVACOR_VOLUME_ID" in "$serial"*) printf '/dev/%s\n' "$name"; return 0 ;; esac
+    done < <(lsblk -dno NAME,SERIAL 2>/dev/null)
+    return 1
+  }
+  echo "--- waiting for scratch volume ${SIVACOR_VOLUME_ID} by serial ---"
+  VOL_DEV=""
+  for _ in $(seq 1 60); do VOL_DEV=$(scratch_dev) && break; sleep 1; done
+  if [ -z "$VOL_DEV" ]; then
+    echo "!! no disk carries serial ${SIVACOR_VOLUME_ID}; refusing to guess a device"
+    # What WAS attached, because the console log is the only post-mortem a fleet
+    # VM gets and "never appeared" alone cost an SSH session on 2026-09-04.
+    lsblk -o NAME,SIZE,SERIAL,TYPE || true
+    ls -l /dev/disk/by-id/ || true
     exit 1
   fi
+  echo "--- scratch volume ${SIVACOR_VOLUME_ID} at ${VOL_DEV} ---"
   # blkid exits non-zero with no output on an unformatted device, which is the
   # clean signal for "mkfs only if needed" -- and makes re-running this safe.
   if ! blkid "$VOL_DEV" >/dev/null 2>&1; then
