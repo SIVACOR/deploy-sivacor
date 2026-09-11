@@ -61,6 +61,18 @@ services:
       # far more often than the controller code -- MANAGER_TENANT_IP alone is a
       # per-rebuild edit. Baking it into the image would create two artifacts that
       # must agree, which is the argument P2.1 used to reject a Packer image.
+      #
+      # EDITING THE TEMPLATE IS NOT A DEPLOY. This is a single-FILE bind mount, so
+      # docker binds it by inode -- and `git pull`/`git merge` do not edit in place,
+      # they write a new file and rename it over the old one. The container keeps
+      # reading the old inode, `build_user_data` re-reads it per create exactly as
+      # designed, and every new worker silently boots the previous template. `docker
+      # stack deploy` does NOT fix it: the service spec is unchanged, so the task is
+      # never recreated. Observed 2026-09-11, when three hours of merged changes
+      # reached no instance at all and the host/container greps disagreed 7 vs 0.
+      #   docker service update --force wt_autoscaler
+      #   docker exec $(docker ps -q -f name=wt_autoscaler) \
+      #     grep -c <a-string-you-just-added> /etc/sivacor/worker-cloud-init.sh
       - ./worker-cloud-init.sh:/etc/sivacor/worker-cloud-init.sh:ro
       # The only way this process can reach OpenStack. Read-only, and the file stays
       # owned by the host user. `OS_*` environment variables work too -- openstacksdk
