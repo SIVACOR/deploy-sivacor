@@ -23,8 +23,9 @@
 # The autoscaler now gzips this UNCONDITIONALLY before encoding, so the number that
 # matters is the compressed one -- the raw base64 has been over 65535 since the C2
 # volume block landed, and that is fine. Check before pushing:
-#   gzip -c worker-cloud-init.sh | base64 -w0 | wc -c     # ~27000, limit 65535
-# The raw figure is no longer the budget; measuring it will scare you for nothing.
+#   gzip -c worker-cloud-init.sh | base64 -w0 | wc -c   # 33264 on 2026-09-11 (51%)
+# The autoscaler's injected block adds ~500 raw bytes, ~90 compressed. The raw figure
+# is no longer the budget; measuring it will scare you for nothing.
 # Long-form rationale belongs in development_notes/, which this file points at.
 
 set -euo pipefail
@@ -144,6 +145,13 @@ UNREACHABLE_TICKS="${UNREACHABLE_TICKS:-8}"
 # network write. Weigh that against the alternative, which is losing the
 # submission every time.
 RECOVER_TICKS="${RECOVER_TICKS:-3}"
+# How often a *repeated* BUSY reason is logged, in ticks. At the 2 min timer, 15 is
+# once per 30 min. See the comment on busy() for why this exists: the serial console
+# is a ~100 KB ring and it is the only store on this VM that survives the delete, so
+# spending it on 756 identical lines is what truncated the 2026-09-11 capture to 27 h
+# of a 46 h instance. A *change* of reason always prints, whatever this is set to.
+# 1 restores the pre-2026-09-11 behaviour of logging every tick.
+BUSY_LOG_EVERY="${BUSY_LOG_EVERY:-15}"
 DEPLOY_USER="ubuntu"; DEPLOY_UID=1000; DEPLOY_GID=1000
 
 # ---- secrets: filled in by the controller; empty = provision manually --------
@@ -466,6 +474,7 @@ IDLE_TIMEOUT_SEC=${IDLE_TIMEOUT_SEC}
 BOOT_GRACE_SEC=${BOOT_GRACE_SEC}
 UNREACHABLE_TICKS=${UNREACHABLE_TICKS}
 RECOVER_TICKS=${RECOVER_TICKS}
+BUSY_LOG_EVERY=${BUSY_LOG_EVERY}
 # Host side of the worker's -v ...:/tmp bind mount, so in-flight work can be seen
 # without going through the container at all -- see workspace_activity().
 WORKER_TMP_HOSTPATH=/home/${DEPLOY_USER}/volumes/tmp
@@ -478,6 +487,8 @@ PY_SPY=/usr/local/bin/py-spy
 STATE=/run/sivacor-idle-since   # /run is tmpfs, so both reset on boot
 FAILS=/run/sivacor-probe-failures
 RECOVERED=/run/sivacor-recovery-attempted   # one restart per wedge, not per tick
+BUSY_TICKS=/run/sivacor-busy-ticks          # "<suppressed> <reason>", see busy()
+IDENT=/run/sivacor-worker-container         # last seen worker container id + StartedAt
 
 log() { echo "$(date -Is) $*"; }
 
@@ -614,8 +625,73 @@ workspace_activity() {
 # $RECOVERED is cleared here too: a worker that has answered again is healthy, and
 # a *later* wedge deserves its own recovery attempt rather than inheriting a spent
 # marker from an earlier one.
-busy()    { rm -f "$STATE" "$FAILS" "$RECOVERED"; log "BUSY: $* -- staying up"; exit 0; }
-blocked() { log "BLOCKED: $* -- staying up, idle clock preserved"; exit 0; }
+# BUSY is almost every tick -- 756 of the 760 that survived 2026-09-11 -- and nova's
+# console is a ~100 KB ring, so at ~118 bytes a line it spent ~85 KB/day and that
+# capture held 27 h of a 46 h instance. A *repeated* reason is therefore logged once
+# per $BUSY_LOG_EVERY ticks with the count it stands for; a *changed* one prints at
+# once. The console keeps transitions and drops repetition.
+# The trade: the per-tick `bash[PID]:` prefix is how the process-churn spike was
+# spotted, and at 1-in-15 that is gone. BUSY_LOG_EVERY=1 while chasing it.
+# The state file holds the reason too, so one kind of busy is never folded into
+# another's run. See incidents/2026-09-11-stalled-run-lost-worker.md.
+busy() {
+  rm -f "$STATE" "$FAILS" "$RECOVERED"
+  reason="$*"
+  quiet=0; last=""
+  [ -r "$BUSY_TICKS" ] && read -r quiet last < "$BUSY_TICKS"
+  case "$quiet" in ''|*[!0-9]*) quiet=0 ;; esac
+  if [ "$reason" != "$last" ]; then
+    log "BUSY: $reason -- staying up"
+    quiet=0
+  elif [ "$(( quiet + 1 ))" -ge "$BUSY_LOG_EVERY" ]; then
+    log "BUSY: $reason -- staying up (+$quiet identical ticks not logged)"
+    quiet=0
+  else
+    quiet=$(( quiet + 1 ))
+  fi
+  printf '%s %s\n' "$quiet" "$reason" > "$BUSY_TICKS"
+  exit 0
+}
+# Every non-busy outcome forgets the run, so the next BUSY prints immediately: a tick
+# that could not observe, or one that saw the worker go idle, is exactly the moment
+# when the following BUSY is worth a line.
+blocked() { rm -f "$BUSY_TICKS"; log "BLOCKED: $* -- staying up, idle clock preserved"; exit 0; }
+
+# The worker container's identity, logged ONLY when it changes: one line per VM
+# lifetime healthy, the whole diagnosis when not.
+#
+# On 2026-09-11 celery died under a live submission and systemd rebuilt it
+# (Restart=always + `docker run --rm`), so the next tick asked a BRAND-NEW worker
+# whether it was busy and was truthfully told no -- indistinguishable, from here, from
+# the legitimate mid-chain idle window where sign_tro runs on the manager. Six minutes
+# later this script powered the VM off on top of a submission whose chain was already
+# unrecoverable (messages ack on receipt, and `task.request.chain` lives inside the
+# acked message). A changed container id IS that distinction.
+#
+# It deliberately does not act: acting means asking Girder whether this VM's claim is
+# still open, a network call this script does not otherwise make.
+check_worker_identity() {
+  # Timed out: this is the least important probe on the tick and must never be why a
+  # check that would have said "stay up" never ran.
+  ident=$(timeout 10 docker inspect -f '{{.Id}}|{{.State.StartedAt}}' "$WORKER_CONTAINER" 2>/dev/null)
+  case "$ident" in ''|*'|') return 0 ;; esac   # absent, or docker would not answer
+  now_ident="$(printf '%s' "${ident%%|*}" | cut -c1-12) started ${ident##*|}"
+  was_ident=$(cat "$IDENT" 2>/dev/null)
+  [ "$now_ident" = "$was_ident" ] && return 0
+  printf '%s\n' "$now_ident" > "$IDENT"
+  if [ -n "$was_ident" ]; then
+    log "WORKER CONTAINER REPLACED: was [$was_ident], now [$now_ident] -- celery is a" \
+        "NEW process, so anything it was running is gone (messages ack on receipt) and" \
+        "an 'idle' answer below is not evidence this VM has no work"
+  else
+    log "worker container: $now_ident"
+  fi
+}
+
+# 0. Worker container identity. Before the boot grace, not after, so the baseline is
+#    recorded from the first tick rather than 10 minutes in; a container that does not
+#    exist yet is a silent no-op.
+check_worker_identity
 
 # 1. Boot grace. A VM created for a queued submission must not power off before
 #    it has had a chance to be handed one.
@@ -657,6 +733,7 @@ others=$(printf '%s\n' "$ps_out" | grep -vx "$WORKER_CONTAINER" | grep -c .)
 #    a worker that cannot be reached over the broker also cannot be *given* work,
 #    so sustained unreachability is evidence for reclaiming, not against.
 unreachable() {
+  rm -f "$BUSY_TICKS"   # a later BUSY is a state change; never fold it into an old run
   n=$(( $(cat "$FAILS" 2>/dev/null || echo 0) + 1 ))
   case "$n" in ''|*[!0-9]*) n=1 ;; esac
   echo "$n" > "$FAILS"
@@ -742,7 +819,7 @@ case "$verdict" in
   # A real answer: the node is reachable, so forget any earlier failures, and fall
   # through to the idle clock. Note this clears $FAILS but NOT $STATE -- the clock
   # must keep accumulating across ticks, that is the whole point of it.
-  idle)     rm -f "$FAILS" ;;
+  idle)     rm -f "$FAILS" "$BUSY_TICKS" ;;
   # Same class as the inspect failing outright: the node did not answer. It is not
   # evidence of idleness, and it is not evidence of work either.
   noreply)  unreachable "celery inspect returned no reply" ;;
@@ -826,7 +903,87 @@ AccuracySec=10s
 [Install]
 WantedBy=timers.target
 EOF
+
+# ---- evidence that outlives the VM (2026-09-11) --------------------------
+# Both units write to the SERIAL CONSOLE for the reason the idle check does: the
+# controller captures `openstack console log show` immediately before deleting a reaped
+# instance, so the console is the only store here that survives it. Journal, dmesg,
+# /var/log/apt and the dockerstats file all die with the disk, which is why
+# incidents/2026-09-11-stalled-run-lost-worker.md has a hole where its cause should be.
+#
+# DELIBERATELY ABSENT: `journalctl -u sivacor-worker`. Either reason alone is enough.
+# (1) VOLUME -- the worker runs --loglevel=INFO and its chatter would evict the
+# supervisor's own ticks from the ~100 KB ring within hours, spending the evidence we
+# use on evidence we might. (2) SECRETS -- a celery task payload carries
+# `encrypted_secrets` and `wrapped_job_key`, which is why the idle check reduces
+# `inspect` to a count before logging it and why dump_wedge_state reads no container
+# logs. Piping that into a file the controller archives off-box routes around both.
+# Read it over ssh on a live instance instead.
+cat > /etc/systemd/system/sivacor-worker-events.service <<'EOF'
+[Unit]
+Description=SIVACOR worker: docker container events to the serial console
+After=docker.service
+Requires=docker.service
+
+[Service]
+# THE EVENT FILTER IS NOT OPTIONAL, and `--filter type=container` alone is not it:
+# container events include exec_create/exec_start/exec_die, and this script's own idle
+# check runs `docker exec` every 2 min -- 3 events a tick, ~2,160/day, ~260 KB, three
+# times what the BUSY throttle above just bought back. Measured on a dev box: 256 of
+# 257 container events in 12 h were exec_* from one healthcheck. Lifecycle only.
+#
+# `oom` is listed because docker emits it when the cgroup OOM-kills a container and
+# nothing else on a reaped VM records that; `die` carries the exit code, and 137 is the
+# SIGKILL/OOM signature the 2026-09-11 capture lacked. The explicit --format also keeps
+# the default line's every-actor-attribute dump out of a file archived off-box; the
+# image digest is left out because the container name already says which is which.
+#
+# The banner is not decoration: `docker events` exits when the daemon goes away, so a
+# SECOND banner mid-run means dockerd restarted -- the event that kills every container
+# at once and is otherwise invisible from the console.
+ExecStartPre=/bin/sh -c 'echo "docker events attached: server $(docker version --format "{{.Server.Version}}" 2>&1)"'
+ExecStart=/usr/bin/docker events --filter type=container --filter event=create --filter event=start --filter event=die --filter event=kill --filter event=oom --filter event=stop --filter event=destroy --format '{{.Time}} {{.Action}} {{.Actor.Attributes.name}} exit={{.Actor.Attributes.exitCode}}'
+Restart=always
+RestartSec=10
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat > /etc/systemd/system/sivacor-worker-hostlog.service <<'EOF'
+[Unit]
+Description=SIVACOR worker: docker daemon and systemd-oomd journal to the serial console
+After=docker.service
+
+[Service]
+# Two units only, both silent in steady state, neither carrying job material.
+# systemd-oomd is why this exists: it kills whole cgroups under memory pressure and
+# logs ONLY to the journal, so on a reaped worker an oomd kill leaves no trace at all --
+# no exit code, no kernel line. That is the exact shape of the 2026-09-11 silence.
+# No feedback loop: the follow is filtered to two other units. -n 0 starts at now
+# rather than replaying the boot into a ring whose whole problem is that it is small.
+ExecStart=/usr/bin/journalctl -f -n 0 -o short-iso -u docker.service -u systemd-oomd.service
+Restart=always
+RestartSec=10
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target
+EOF
 systemctl daemon-reload
+
+# Armed here, not in the start block below: an instance whose preflight fails or whose
+# credentials never arrive is precisely one somebody will want the evidence from, and
+# gating collection on a successful start would switch it off in that case. Ephemeral
+# only -- a hand-made debug worker keeps its journal, so the console buys it nothing.
+if [ "$EPHEMERAL_WORKER" = 1 ]; then
+  systemctl enable --now sivacor-worker-events.service sivacor-worker-hostlog.service \
+    && echo "--- console evidence armed: docker events + docker/oomd journal ---" \
+    || echo "!! could not arm console evidence units (non-fatal)"
+fi
 
 # ---- preflight -----------------------------------------------------------
 cat > /usr/local/bin/sivacor-worker-preflight <<'PF'
@@ -946,11 +1103,24 @@ consecutive ticks with no analysis containers -- a worker whose broker connectio
 has died cannot be given work, so staying up would strand the VM until the
 controller's 30 h cap. Each tick logs one of BUSY (real work, clock cleared),
 BLOCKED (cannot observe, clock kept), UNREACHABLE (n/N, clock kept) or the idle
-countdown, so the journal says exactly which it was. To debug without any of it:
+countdown, so the journal says exactly which it was. A repeated BUSY is logged
+once per ${BUSY_LOG_EVERY} ticks (the console is a small ring); a change of reason,
+and any change of the worker container's id, always prints. To debug without any of it:
     sudo systemctl stop sivacor-worker-idle.timer
     sudo /usr/local/bin/sivacor-worker-idle-check   # dry-ish: logs its reasoning
     journalctl -u sivacor-worker-idle -f            # why it stayed up
     openstack console log show <id>                 # same, with no ssh access
+    sudo BUSY_LOG_EVERY=1 /usr/local/bin/sivacor-worker-idle-check   # every tick
+
+## 4c. Evidence that outlives this VM
+Two units copy container lifecycle events and the docker/systemd-oomd journal to the
+serial console, which the controller captures just before it deletes a reaped
+instance -- everything else here dies with the disk.
+    systemctl status sivacor-worker-events sivacor-worker-hostlog
+    journalctl -u sivacor-worker-events -f    # container die/kill with exit codes
+A second "docker events attached" banner mid-run means dockerd restarted, which kills
+every analysis container at once. The worker's OWN log is deliberately not copied
+there: it is too noisy for the ring and its task payloads carry job secrets.
 
 ## 5. On the manager
 Set SIVACOR_MANAGER_QUEUES=local,sivacor.static-01 so it stops taking
