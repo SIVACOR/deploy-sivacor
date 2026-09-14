@@ -36,7 +36,7 @@ services:
   # keyring is treated on `local_worker`.
   autoscaler:
     # The controller runs from the girder-sivacor image, not its own
-    # (worker_sizing_plan.md S3, P0.5): assignment happens through Girder's model
+    # (03_worker_sizing_plan.md S3, P0.5): assignment happens through Girder's model
     # layer in-process, which needs girder/girder_worker/girder_sivacor importable.
     # `beat` and `local_worker` already do exactly this with different entrypoints;
     # this is the third. `SIVACOR_AUTOSCALER_IMAGE` is retired.
@@ -157,7 +157,7 @@ services:
       # own default, `sivacor,<its private queue>` -- both the shared dispatch queue
       # and its own, which is what every worker has always done. Set it to the private
       # word `private` once THIS deployment has armed targeted assignment and nothing
-      # publishes to `sivacor` (worker_sizing_plan.md P2, rollout step 4). A word, not a
+      # publishes to `sivacor` (03_worker_sizing_plan.md P2, rollout step 4). A word, not a
       # queue list: the private queue is `sivacor.<the VM's uuid>` and cannot be named
       # off-box, so a literal attempt arrives verbatim and the worker consumes nothing.
       #

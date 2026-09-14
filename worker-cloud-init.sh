@@ -1,14 +1,14 @@
 #!/bin/bash
 # SIVACOR worker — cloud-init user-data, passed by launch-worker.py.
 # Runs once as root on first boot. Log: /var/log/sivacor-provision.log
-# Full rationale: autoscaling_plan.md P1.2. Post-boot steps: ~/NEXT_STEPS.md
+# Full rationale: 01_autoscaling_plan.md P1.2. Post-boot steps: ~/NEXT_STEPS.md
 #
 # SECRETS: MASTER_KEY_HEX and REDIS_PASSWORD may be supplied in the config block
 # below, and under autoscaling they are. DELIBERATE -- do not "fix" it. Both are
 # shared-fleet values and anyone who can read this user-data can boot a worker and
 # read them off it anyway. The real cost is that user-data outlives the instance in
 # Nova's DB, so treat both as permanently disclosed to anyone who ever gets project
-# read access, and rotate on membership change. Reasoning: autoscaling_plan.md P2.2.
+# read access, and rotate on membership change. Reasoning: 01_autoscaling_plan.md P2.2.
 # Left empty -> worker.env gets FILL_ME and the unit stays stopped, as before.
 #
 # Target: JS2 Ubuntu 24.04 (noble), m3.medium+ (needs the 60 GB root disk).
@@ -79,7 +79,7 @@ WORKER_QUEUE_OVERRIDE="${WORKER_QUEUE_OVERRIDE:-}"
 #
 # Set `SIVACOR_WORKER_QUEUES=private` in the deployment's .env -- injected by the
 # controller -- once targeted assignment is armed there and nothing publishes to
-# `sivacor` any more (worker_sizing_plan.md P2, rollout step 4). See the case statement
+# `sivacor` any more (03_worker_sizing_plan.md P2, rollout step 4). See the case statement
 # below for why the value is a word and not a queue list. It is a
 # variable rather than an edit to the line below because THIS FILE IS SHARED: one
 # checkout is bind-mounted by the mirror and by production, which are at different
@@ -1059,7 +1059,7 @@ cat > /home/"$DEPLOY_USER"/NEXT_STEPS.md <<EOF
 # SIVACOR worker - manual steps
 
 Provisioned $(date -Is). Log: /var/log/sivacor-provision.log
-Details: autoscaling_plan.md P1.2
+Details: 01_autoscaling_plan.md P1.2
 
 Already done (see the log for detail): packages, dirs, ${GIRDER_HOST} -> ${MANAGER_TENANT_IP},
 worker image, docker GID ${DOCKER_GID}, queue ${WORKER_QUEUE}, systemd unit.
