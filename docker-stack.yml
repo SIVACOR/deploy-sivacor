@@ -43,13 +43,25 @@ services:
       placement:
         constraints:
           - "node.role == manager"
+    # The access log went from writing nothing to writing every non-2xx, and
+    # json-file does not rotate unless told to. 5x50M is a hard ceiling on the
+    # manager's root disk, which it shares with mongo and the assetstore.
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
     environment:
       - CF_DNS_API_TOKEN=${CF_DNS_API_TOKEN}
       - CF_ZONE_API_TOKEN=${CF_DNS_API_TOKEN}
     command:
-      - "--accesslog=true"
-      - "--accesslog.format=json"
-      - "--accesslog.filepath=/dev/stdout"
+      # No `--accesslog.*` flags here on purpose. Static config is resolved
+      # file -> CLI -> env with CLI winning *per option*, so a single
+      # `--accesslog.filepath=/dev/stdout` left behind would override the file
+      # and re-detach the whole log stream from stdout -- which is exactly the
+      # state this stack sat in from 2026-08-05 to 2026-09-18 (json-file: 0
+      # bytes). accessLog now lives entirely in traefik/config.yml.
+      #
       # Traefik's default log level is ERROR, which is why a stack that never
       # even attempts ACME looks completely silent. INFO shows certificate
       # acquisition; DEBUG adds lego's DNS-01 challenge steps and is what you

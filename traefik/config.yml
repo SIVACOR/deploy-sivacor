@@ -14,6 +14,58 @@ entryPoints:
 serversTransport:
   insecureSkipVerify: true
 
+# Access logging. Lives here rather than as `--accesslog.*` CLI flags because
+# setting `accesslog.filepath` at all detaches Traefik's whole log stream from
+# stdout (traefik#11717): between 2026-08-05 and 2026-09-18 this container's
+# json-file log was *zero bytes* -- no access lines and not even the INFO
+# startup banner -- which is why the 502 that killed submission
+# `ferocious-fader` after 20 h could never be explained. Omitting filePath is
+# what restores stdout; it is already the documented default.
+accessLog:
+  format: json
+  filters:
+    # OR-ed, not AND-ed: an entry is kept if it matches ANY filter
+    # (pkg/middlewares/accesslog/logger.go, keepAccessLog). That is what makes
+    # the status ranges sufficient on their own -- a 502 is kept however fast
+    # it returned -- and it is why adding any duration filter here would leak
+    # 2xx back in rather than narrowing anything.
+    #
+    # 2xx is deliberately absent: heartbeats alone are ~7k/day per worker and
+    # would bury the rare failures this log exists to catch.
+    statusCodes:
+      - "101-101"
+      - "300-302"
+      # Full 4xx/5xx rather than the narrower 400-413 / 500-523: "all errors"
+      # is the point, and widening is near-free because the only high-volume
+      # client error -- 404 from internet scanners -- was already inside the
+      # narrow range. This adds 414-499 (429, 431) and 524-599.
+      - "400-499"
+      - "500-599"
+    # No minDuration. Filters are OR-ed, so it could never gate an error --
+    # a 502 is kept by statusCodes however fast it returned -- while it *would*
+    # have re-admitted every 2xx slower than the threshold (uploads, folder
+    # listings, TRO downloads all clear 250ms), undoing the exclusion above.
+    #
+    # retryAttempts is a no-op today: no retry middleware is configured, so
+    # attempts is always 0. Kept because it costs nothing and starts paying the
+    # moment one is added.
+    retryAttempts: true
+  fields:
+    defaultMode: keep
+    names:
+      ClientUsername: drop
+    headers:
+      # `drop`, NOT `keep`. SIVACOR does not authenticate with `Authorization`:
+      # workers send a live `Girder-Token` header (see any job's jobInfoSpec)
+      # and the browser sends `girderToken` in a `Cookie`. A default of `keep`
+      # would write a working credential into this log on every request,
+      # including the worker log-flush PUTs. Add individual headers here only
+      # after checking they carry no token.
+      defaultMode: drop
+      names:
+        Content-Type: keep
+        User-Agent: redact
+
 certificatesResolvers:
   cloudflare:
     acme:
