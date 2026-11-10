@@ -145,6 +145,9 @@ services:
       - GIRDER_SETTING_CORE_CONTACT_EMAIL_ADDRESS=${GIRDER_ADMIN_EMAIL:-admin@sivacor.org}
       - GIRDER_SETTING_CORE_EMAIL_FROM_ADDRESS=SIVACOR Admin <${GIRDER_ADMIN_EMAIL:-admin@sivacor.org}>
       - GIRDER_SETTING_CORE_EMAIL_HOST=https://girder.${domain}
+      # API root, and so the OAuth callback URL Girder builds. Also what
+      # girder-sivacor#157 compares the TRS profile's host against.
+      - GIRDER_SETTING_CORE_SERVER_ROOT=https://girder.${domain}
       - GIRDER_SETTING_CORE_REGISTRATION_POLICY=open
       - GIRDER_SETTING_CORE_SMTP_ENCRYPTION=${GIRDER_SMTP_ENCRYPTION:-ssl}
       - GIRDER_SETTING_CORE_SMTP_HOST=${GIRDER_SMTP_HOST:-mail.spacemail.com}
@@ -222,6 +225,9 @@ services:
       - GIRDER_SETTING_CORE_CONTACT_EMAIL_ADDRESS=${GIRDER_ADMIN_EMAIL:-admin@sivacor.org}
       - GIRDER_SETTING_CORE_EMAIL_FROM_ADDRESS=SIVACOR Admin <${GIRDER_ADMIN_EMAIL:-admin@sivacor.org}>
       - GIRDER_SETTING_CORE_EMAIL_HOST=https://girder.${domain}
+      # API root, and so the OAuth callback URL Girder builds. Also what
+      # girder-sivacor#157 compares the TRS profile's host against.
+      - GIRDER_SETTING_CORE_SERVER_ROOT=https://girder.${domain}
       - GIRDER_SETTING_CORE_SMTP_ENCRYPTION=${GIRDER_SMTP_ENCRYPTION:-ssl}
       - GIRDER_SETTING_CORE_SMTP_HOST=${GIRDER_SMTP_HOST:-mail.spacemail.com}
       - GIRDER_SETTING_CORE_SMTP_PASSWORD=${GIRDER_SMTP_PASSWORD}
@@ -313,6 +319,9 @@ services:
       - GIRDER_SETTING_CORE_CONTACT_EMAIL_ADDRESS=${GIRDER_ADMIN_EMAIL:-admin@sivacor.org}
       - GIRDER_SETTING_CORE_EMAIL_FROM_ADDRESS=SIVACOR Admin <${GIRDER_ADMIN_EMAIL:-admin@sivacor.org}>
       - GIRDER_SETTING_CORE_EMAIL_HOST=https://girder.${domain}
+      # API root, and so the OAuth callback URL Girder builds. Also what
+      # girder-sivacor#157 compares the TRS profile's host against.
+      - GIRDER_SETTING_CORE_SERVER_ROOT=https://girder.${domain}
       - GIRDER_SETTING_CORE_SMTP_ENCRYPTION=${GIRDER_SMTP_ENCRYPTION:-ssl}
       - GIRDER_SETTING_CORE_SMTP_HOST=${GIRDER_SMTP_HOST:-mail.spacemail.com}
       - GIRDER_SETTING_CORE_SMTP_PASSWORD=${GIRDER_SMTP_PASSWORD}
