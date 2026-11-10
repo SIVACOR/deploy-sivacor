@@ -55,7 +55,7 @@ existing `.env` needs none of them.
 | `GIRDER_OAUTH_PROVIDERS` | `globus` | Comma-separated login providers (`globus`, `orcid`) seeded into `oauth.providers_enabled` **on first setup only**. Explicit rather than derived from which client ids are set, because production carries ORCID credentials with ORCID deliberately off. `setup_girder.py` refuses a provider whose `*_CLIENT_ID` is unset, before creating anything — an enabled provider with no app makes the login page show *Authentication Error*. |
 | `GIRDER_EMAIL_TO_CONSOLE` | unset | Any **non-empty** value makes `notifications.py:_submitEmail` print the message to stdout and return before touching SMTP. Lets a test stack run with blank `GIRDER_SMTP_*`. Read the mail with `docker service logs -f wt_girder` — the `jobs.job.update.after` handler runs in the Girder server, so that is where submission mail is emitted, not the worker. **Note:** it is a bare truthiness check, so `false` also redirects; leave it unset to send for real. |
 | `TRAEFIK_LOG_LEVEL` | `INFO` | Traefik's own default is `ERROR`, which makes certificate problems invisible. Use `DEBUG` to see lego's DNS-01 challenge steps when a cert is not appearing. Passed as a CLI flag because `traefik/config.yml` is a bind mount and is never interpolated. |
-| `DOCS_URL` | `https://docs.sivacor.org/` | Where the apex host redirects. |
+| `DOCS_URL` | `https://docs.sivacor.org/` | Where the apex host redirects. Also seeds `sivacor.docs_url`, the docs link in mail, **on first setup only** and only if set. Change the redirect later and the mail link stays where it was: that one goes through the settings API. |
 | `FEEDBACK_URL` | the Qualtrics form | Where `feedback.$domain` redirects. |
 | `SIVACOR_AUTOSCALING` | unset (**off**) | Any non-empty value makes `make dev` merge `docker-stack.autoscaler.yml` and run the fleet controller. Off, the stack needs no OpenStack credentials at all. |
 | `OS_CLOUD` | — | Entry in `clouds.yaml`. **Required when `SIVACOR_AUTOSCALING` is set**, unused otherwise. |
@@ -292,7 +292,7 @@ the sweeps do not need one.
 
 ## Girder settings — the other plane, and the whole list
 
-**This file is a `.env` reference, and `.env` is only half of the configuration.** Twenty-three
+**This file is a `.env` reference, and `.env` is only half of the configuration.** Twenty-four
 `sivacor.*` settings live in **MongoDB**, not in the environment, and the two planes behave
 differently in the way that matters most: a `.env` change needs `make dev`, while almost
 every setting below is read **per request or per controller tick**, so it takes effect
@@ -308,7 +308,7 @@ where it differs (`girder_sivacor/settings.py` is the authority for defaults).
 | `sivacor.max_runtime` | **168** h [24] | A run is stopped after this. Must stay *below* `SIVACOR_MAX_LIFETIME_HOURS` (180) or the VM is deleted under a live run. |
 | `sivacor.heartbeat_timeout` | 30 min | No activity for this long ⇒ `reaped_no_heartbeat`. Generous on purpose: only the container run ticks it, so quiet stretches are whole pipeline steps. |
 | `sivacor.assignment_timeout` | 60 min | Only meaningful under targeted assignment: how long a submission may wait for an instance before failing as `reaped_no_worker`. |
-| `sivacor.targeted_assignment` | **true** | Whether the controller places submissions instead of publishing to the shared queue. **One setting because two processes must agree.** Disarming is no longer safe here — see *Queues*. |
+| `sivacor.targeted_assignment` | **true** | Whether the controller places submissions instead of publishing to the shared queue. **One setting because two processes must agree.** Disarming is no longer safe here — see *Queues*. **Public since girder-sivacor#160**: served unauthenticated by `GET /system/public_settings`, still admin-only to change. The UI reads it there: when it is `false`, the submission form offers neither worker size nor scratch disk (aea-sivacor#53), since the shared queue honours neither. A missing key, from a Girder before #160, keeps both. |
 | `sivacor.worker_sizes` | 30/60 self-service, 125/250 gated | The size catalogue. See *Worker sizes* below. |
 | `sivacor.worker_size_group_name` | `Large Workers` | Group whose members may pick a gated rung. Admins bypass. |
 | `sivacor.volumes_enabled` | **true** | Scratch-volume master switch. See *Extra scratch disk*. |
@@ -325,6 +325,7 @@ where it differs (`girder_sivacor/settings.py` is the authority for defaults).
 | `sivacor.editors_group_name` | `Editors` | Group with editor privileges. |
 | `sivacor.uploads_folder_name` | `Uploads` | Per-user upload folder name. |
 | `sivacor.support_email` | [`support@sivacor.org`] (added after the 2026-08-22 read) | Where researcher-facing messages, mail and the web UI's Contact Support send people. **Public**: served unauthenticated by `GET /system/public_settings`, which is how the UI reads it. Deliberately separate from `core.contact_email_address`, which `GIRDER_ADMIN_EMAIL` pins as the mail *sender*. Seeded from `SIVACOR_SUPPORT_EMAIL` on first setup only, and only if that is set. |
+| `sivacor.docs_url` | did not exist (added by girder-sivacor#160) | The documentation link in the three researcher mail templates and in the admin alert mails. Defaults to `https://docs.sivacor.org`, the URL that used to be hardcoded, so an upgrade changes nothing. A setting rather than derived from `$domain`, because there is one docs site and a test stack has none of its own. Must be an http(s) URL with a host; blank is refused. **Public**, like `support_email`. Seeded from `DOCS_URL` on first setup only, and only if that is set. |
 | `sivacor.pseudonym_salt` | generated on first use (added after the 2026-08-22 read) | HMAC key for the pseudonyms a redacted chain job carries in place of a user id. **A secret** in the same class as `tro_gpg_passphrase`: never log, export or copy it. Never rotate it either, because that splits every cohort in two. **Deleting it is the kill switch**: every pseudonym ever written becomes unlinkable. |
 | `sivacor.submission_collection_name` | `Submissions` | Collection holding submission folders. Renaming it orphans every existing submission. |
 

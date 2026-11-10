@@ -288,6 +288,12 @@ if os.environ.get("SIVACOR_IMAGE_TAGS_URL"):
         {"key": "sivacor.image_tags_url", "value": os.environ["SIVACOR_IMAGE_TAGS_URL"]}
     )
 
+# The docs link in mail. DOCS_URL already names this deployment's docs for the
+# apex redirect, so one variable sets both. Unset leaves the plugin default
+# (https://docs.sivacor.org), which is the same site the redirect defaults to.
+if os.environ.get("DOCS_URL"):
+    settings.append({"key": "sivacor.docs_url", "value": os.environ["DOCS_URL"]})
+
 # An unset .env variable is left out rather than sent as null, so the setting
 # keeps the plugin's default and the read-back below has something definite to
 # compare. Named, never valued: some of these are secrets.
