@@ -278,6 +278,16 @@ if os.environ.get("SIVACOR_SUPPORT_EMAIL"):
         {"key": "sivacor.support_email", "value": os.environ["SIVACOR_SUPPORT_EMAIL"]}
     )
 
+# Where the analysis-image allow-list is fetched from. Unset leaves the plugin
+# default, which is "never fetch": sivacor.image_tags is then the list itself,
+# and its built-in value is old -- curate it on the plugin's config page. A
+# rebuilt SIVACOR deployment wants this set (see ENVIRONMENT.md); prefer a
+# pinned commit to a branch, which reaches the deployment without a deploy.
+if os.environ.get("SIVACOR_IMAGE_TAGS_URL"):
+    settings.append(
+        {"key": "sivacor.image_tags_url", "value": os.environ["SIVACOR_IMAGE_TAGS_URL"]}
+    )
+
 # An unset .env variable is left out rather than sent as null, so the setting
 # keeps the plugin's default and the read-back below has something definite to
 # compare. Named, never valued: some of these are secrets.

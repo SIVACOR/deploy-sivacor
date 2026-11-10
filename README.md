@@ -80,7 +80,8 @@ Roughly half of what you can configure is **not** in `.env`.
   requires a redeploy.
 - **Girder settings** (`sivacor.*`, in MongoDB) — policy: the worker-size catalogue, the
   scratch-volume switch and budget, retention and runtime caps, targeted assignment. Set
-  through the settings API or `girder-shell` on the manager (there is no admin UI for them). Most take
+  through the settings API or `girder-shell` on the manager; only the image allow-list has a
+  config page. Most take
   effect without a redeploy.
 
 `setup_girder.py` seeds the second plane **only on a database with no admin user**. On an

@@ -29,7 +29,7 @@ has to contain.
 | `GLOBUS_CLIENT_ID` / `GLOBUS_CLIENT_SECRET` | Globus OAuth. Required while `GIRDER_OAUTH_PROVIDERS` includes `globus`, which it does by default. |
 | `ORCID_CLIENT_ID` / `ORCID_CLIENT_SECRET` | ORCID OAuth. Only used if `GIRDER_OAUTH_PROVIDERS` includes `orcid`; **production carries these with ORCID switched off**. |
 | `GIRDER_ADMIN_PASSWORD` | Password of the `admin` account `setup_girder.py` creates. **Read only on a first-time setup**, and required only then: on a database that already has an admin the script never reads it, so an existing deployment's `.env` does not need it. Never printed. |
-| `GIRDER_SIVACOR_TRO_GPG_FINGERPRINT` / `GIRDER_SIVACOR_TRO_GPG_PASSPHRASE` | TRS signing key, for `run_tro("sign")`. **Read only on a first-time setup.** `setup_girder.py` seeds these into `sivacor.tro_gpg_fingerprint` / `sivacor.tro_gpg_passphrase`, but it exits at its admin-user check on any database that already has an admin — so editing them here and re-running `make dev` changes nothing (it says so: *"nothing was changed"*). Change them through the settings API or `girder-shell` — there is no admin UI for `sivacor.*` settings. Same applies to `sivacor.stata_license` from `STATA_LICENSE_HOSTPATH`. See *Deployment traps* 6 in `01_autoscaling_plan.md`. |
+| `GIRDER_SIVACOR_TRO_GPG_FINGERPRINT` / `GIRDER_SIVACOR_TRO_GPG_PASSPHRASE` | TRS signing key, for `run_tro("sign")`. **Read only on a first-time setup.** `setup_girder.py` seeds these into `sivacor.tro_gpg_fingerprint` / `sivacor.tro_gpg_passphrase`, but it exits at its admin-user check on any database that already has an admin — so editing them here and re-running `make dev` changes nothing (it says so: *"nothing was changed"*). Change them through the settings API or `girder-shell` — the plugin's config page covers only the image allow-list. Same applies to `sivacor.stata_license` from `STATA_LICENSE_HOSTPATH`. See *Deployment traps* 6 in `01_autoscaling_plan.md`. |
 | `MASTER_KEY_HEX` | See below. |
 | `REDIS_PASSWORD` | See below. **New — an existing `.env` without it will refuse to deploy.** |
 
@@ -50,6 +50,7 @@ existing `.env` needs none of them.
 | `REDIS_DATA_HOSTPATH` | `/home/ubuntu/redis_data` | Host directory holding the broker's data — production's default is where its external volume is mounted. `make dirs` creates it (no `chown`: the redis entrypoint fixes ownership). **Changing it on a live deployment starts the broker on an empty directory**: queued submissions and pending logs are lost unless the data is moved first. |
 | `GNUPG_HOSTPATH` | `/home/ubuntu/.gnupg` | Host GPG keyring holding the TRS signing key, bind-mounted into `local_worker` only — off-box workers hold no key. It is the deployment's identity: every TRO is signed with it. Must be readable by uid 1000. `make dirs` **refuses to deploy** if it is missing rather than creating it, because an empty directory would start fine and fail every submission at `run_tro("sign")`, after the analysis had run. |
 | `GIRDER_SMTP_HOST` / `GIRDER_SMTP_PORT` / `GIRDER_SMTP_ENCRYPTION` | `mail.spacemail.com` / `465` / `ssl` | Outgoing mail relay, for `girder`, `beat` and `local_worker` alike. |
+| `SIVACOR_IMAGE_TAGS_URL` | unset | Seeds `sivacor.image_tags_url` **on first setup only**. Unset leaves it empty, so the deployment never fetches and its allow-list is `sivacor.image_tags`, whose built-in value is stale — curate it on the plugin's config page. **A rebuilt SIVACOR deployment should set it**, preferably to a pinned commit of `sivacor-repo-choice`'s `allowed_repos.yaml`. |
 | `SIVACOR_SUPPORT_EMAIL` | unset | Seeds `sivacor.support_email` **on first setup only**, so a third-party deployment does not send its users to SIVACOR's support. Unset leaves the setting at the plugin default, `support@sivacor.org`; later changes go through the settings API. Not `GIRDER_ADMIN_EMAIL`, which is the mail sender. |
 | `GIRDER_OAUTH_PROVIDERS` | `globus` | Comma-separated login providers (`globus`, `orcid`) seeded into `oauth.providers_enabled` **on first setup only**. Explicit rather than derived from which client ids are set, because production carries ORCID credentials with ORCID deliberately off. `setup_girder.py` refuses a provider whose `*_CLIENT_ID` is unset, before creating anything — an enabled provider with no app makes the login page show *Authentication Error*. |
 | `GIRDER_EMAIL_TO_CONSOLE` | unset | Any **non-empty** value makes `notifications.py:_submitEmail` print the message to stdout and return before touching SMTP. Lets a test stack run with blank `GIRDER_SMTP_*`. Read the mail with `docker service logs -f wt_girder` — the `jobs.job.update.after` handler runs in the Girder server, so that is where submission mail is emitted, not the worker. **Note:** it is a bare truthiness check, so `false` also redirects; leave it unset to send for real. |
@@ -291,7 +292,7 @@ the sweeps do not need one.
 
 ## Girder settings — the other plane, and the whole list
 
-**This file is a `.env` reference, and `.env` is only half of the configuration.** Twenty-one
+**This file is a `.env` reference, and `.env` is only half of the configuration.** Twenty-two
 `sivacor.*` settings live in **MongoDB**, not in the environment, and the two planes behave
 differently in the way that matters most: a `.env` change needs `make dev`, while almost
 every setting below is read **per request or per controller tick**, so it takes effect
@@ -314,7 +315,8 @@ where it differs (`girder_sivacor/settings.py` is the authority for defaults).
 | `sivacor.volume_total_gb` | **100** | Bounds a **single** request. See *Extra scratch disk*. |
 | `sivacor.banner_enabled` | false | Shows `banner_message` across the UI. |
 | `sivacor.banner_message` | `""` (cleared 2026-08-22) | **Read it before enabling.** The message persists after the banner is switched off, so flipping `banner_enabled` on republishes whatever was last written. It held an August 4–5 maintenance notice for two weeks after that window passed, invisible only because the banner was off. Clear it when you disable it, not when you next need it. |
-| `sivacor.image_tags` | 10 repos | Allow-list cache, refreshed every 4 h from `sivacor-repo-choice`. Hand-editing is overwritten. |
+| `sivacor.image_tags` | 10 repos — the built-in default, i.e. **not stored** | The analysis-image allow-list: what the submission form offers and what `submit_job` accepts. **Since girder-sivacor#156 it is the list itself** whenever `image_tags_url` is empty, and only the fallback for a failed fetch otherwise. Before that it was only ever *read*, as a fetch fallback; it was never overwritten. Its built-in value is stale: 10 images against the 18 `sivacor-repo-choice` serves. It has no Dynare, no Julia and no `stata19-mp`, and its R images stop at 4.5.2 while its Stata 18/19.5 tags are old. **Read *Upgrading past girder-sivacor#156* below before moving an image pin.** Editable on the plugin's config page. |
+| `sivacor.image_tags_url` | did not exist (added by girder-sivacor#156) | YAML allow-list fetched every 4 h, with failed fetches retried after 5 min; `sivacor.image_tags` is served meanwhile, and the config page shows the error. **Empty (the default) means never fetch.** Before #156 every deployment fetched `sivacor-repo-choice`'s `main`, hardcoded. Point it at a **pinned commit** rather than a branch: a branch lets a merge there reach the deployment within 4 hours, with no deploy. Seeded from `SIVACOR_IMAGE_TAGS_URL` on first setup only. Editable on the plugin's config page. |
 | `sivacor.tro_gpg_fingerprint` | set | TRS signing key. Seeded from `.env` **on first setup only** — see *Required*. |
 | `sivacor.tro_gpg_passphrase` | set | Same. Never log it. |
 | `sivacor.tro_profile` | 7 fields | The TRS certificate: capabilities, owner, contact. Edit only alongside `trace-specification` — capabilities here back every claim in a signed TRO. |
@@ -377,7 +379,44 @@ the box, this one from on it.
 its admin-user check on a database that already has an admin, saying *"nothing was
 changed"*. So the `.env` variables that *seed* settings —
 `GIRDER_SIVACOR_TRO_GPG_*`, `STATA_LICENSE_HOSTPATH` — are first-time-only, and every later
-change goes through the API or `girder-shell` (there is no admin UI for `sivacor.*` settings).
+change goes through the API or `girder-shell`. The one exception is the image allow-list, which has a config page
+(Admin console → Plugins → SIVACOR, `#plugins/sivacor/config`).
+
+### Upgrading past girder-sivacor#156 — store the allow-list first
+
+Images before #156 fetch the allow-list from `sivacor-repo-choice`'s `main`, hardcoded, and
+read `sivacor.image_tags` only if that fails. Images from #156 on fetch **nothing** unless
+`sivacor.image_tags_url` is set, and serve `sivacor.image_tags` as the list. On a deployment
+that never stored that setting — production's 2026-08-22 reading suggests neither does —
+moving the `GIRDER_SIVACOR_IMAGE` pin past #156 shrinks the allow-list to the stale built-in
+default. The form then stops offering Dynare, Julia, `stata19-mp` and every R release after
+4.5.2, and `submit_job` refuses them.
+
+The new URL setting cannot be set ahead of the upgrade: the old image rejects a key it has
+no validator for (`Invalid setting key`). Store the *list* instead. The old image accepts
+that and ignores it while its fetch succeeds, and the new one serves it the moment it
+starts:
+
+```sh
+# on the manager, BEFORE moving the image pin past #156; once per deployment
+docker exec -i $(docker ps -q -f name=wt_girder) girder-shell <<'PY'
+import requests, yaml
+from girder.models.setting import Setting
+from girder_sivacor.settings import PluginSettings as P
+print("already stored:", Setting().findOne({"key": P.IMAGE_TAGS}) is not None)
+url = "https://raw.githubusercontent.com/SIVACOR/sivacor-repo-choice/refs/heads/main/allowed_repos.yaml"
+tags = yaml.load(requests.get(url, timeout=10).text, Loader=yaml.BaseLoader)  # strings, as #156 parses
+print(len(tags), "images"); _ = Setting().set(P.IMAGE_TAGS, tags)
+PY
+```
+
+Check after the upgrade that `curl -s https://girder.$domain/api/v1/sivacor/image_tags`
+lists the same images as before. Then choose on the config page:
+- **URL empty:** keep curating the list there.
+- **Pinned commit:** follow `sivacor-repo-choice`, but only when you move the pin.
+- **`main`:** the old behaviour, including its no-deploy path to production.
+
+Both `.env` files pin the image by digest, so neither deployment crosses #156 by accident.
 
 ### Girder *core* settings, set from the environment
 
