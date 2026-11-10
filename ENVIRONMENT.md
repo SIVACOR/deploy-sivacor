@@ -29,7 +29,7 @@ has to contain.
 | `GLOBUS_CLIENT_ID` / `GLOBUS_CLIENT_SECRET` | Globus OAuth. Required while `GIRDER_OAUTH_PROVIDERS` includes `globus`, which it does by default. |
 | `ORCID_CLIENT_ID` / `ORCID_CLIENT_SECRET` | ORCID OAuth. Only used if `GIRDER_OAUTH_PROVIDERS` includes `orcid`; **production carries these with ORCID switched off**. |
 | `GIRDER_ADMIN_PASSWORD` | Password of the `admin` account `setup_girder.py` creates. **Read only on a first-time setup**, and required only then: on a database that already has an admin the script never reads it, so an existing deployment's `.env` does not need it. Never printed. |
-| `GIRDER_SIVACOR_TRO_GPG_FINGERPRINT` / `GIRDER_SIVACOR_TRO_GPG_PASSPHRASE` | TRS signing key, for `run_tro("sign")`. **Read only on a first-time setup.** `setup_girder.py` seeds these into `sivacor.tro_gpg_fingerprint` / `sivacor.tro_gpg_passphrase`, but it exits at its admin-user check on any database that already has an admin — so editing them here and re-running `make dev` changes nothing (it says so: *"nothing was changed"*). Change them through the settings API or `girder-shell` — the plugin's config page covers only the image allow-list. Same applies to `sivacor.stata_license` from `STATA_LICENSE_HOSTPATH`. See *Deployment traps* 6 in `01_autoscaling_plan.md`. |
+| `GIRDER_SIVACOR_TRO_GPG_FINGERPRINT` / `GIRDER_SIVACOR_TRO_GPG_PASSPHRASE` | TRS signing key, for `run_tro("sign")`. **Read only on a first-time setup.** `setup_girder.py` seeds these into `sivacor.tro_gpg_fingerprint` / `sivacor.tro_gpg_passphrase`, but it exits at its admin-user check on any database that already has an admin — so editing them here and re-running `make dev` changes nothing (it says so: *"nothing was changed"*). Change them through the settings API or `girder-shell` — the plugin's config page covers only the image allow-list and, since girder-sivacor#157, the TRS profile. Same applies to `sivacor.stata_license` from `STATA_LICENSE_HOSTPATH`. See *Deployment traps* 6 in `01_autoscaling_plan.md`. |
 | `MASTER_KEY_HEX` | See below. |
 | `REDIS_PASSWORD` | See below. **New — an existing `.env` without it will refuse to deploy.** |
 
@@ -319,7 +319,7 @@ where it differs (`girder_sivacor/settings.py` is the authority for defaults).
 | `sivacor.image_tags_url` | did not exist (added by girder-sivacor#156) | YAML allow-list fetched every 4 h, with failed fetches retried after 5 min; `sivacor.image_tags` is served meanwhile, and the config page shows the error. **Empty (the default) means never fetch.** Before #156 every deployment fetched `sivacor-repo-choice`'s `main`, hardcoded. Point it at a **pinned commit** rather than a branch: a branch lets a merge there reach the deployment within 4 hours, with no deploy. Seeded from `SIVACOR_IMAGE_TAGS_URL` on first setup only. Editable on the plugin's config page. |
 | `sivacor.tro_gpg_fingerprint` | set | TRS signing key. Seeded from `.env` **on first setup only** — see *Required*. |
 | `sivacor.tro_gpg_passphrase` | set | Same. Never log it. |
-| `sivacor.tro_profile` | 7 fields | The TRS certificate: capabilities, owner, contact. Edit only alongside `trace-specification` — capabilities here back every claim in a signed TRO. |
+| `sivacor.tro_profile` | 7 fields | The TRS certificate: identity, capabilities, owner, contact. Every TRO this deployment signs names it as the system that certified the run, and its capabilities back every claim in that TRO, so declare only what the deployment actually enforces. **Since girder-sivacor#157 it is editable on the plugin's config page**, as free-text JSON. Before that it took the settings API or `girder-shell`. Since #157 the validator also **requires the capabilities every run claims**: `trov:CanIsolateEnvironment`, `trov:CanPreventAuthorIntervention` and `trov:CanEnforceCapabilitiesTechnically`. A profile without one is refused when saved. A profile stored before #157 is not re-validated, so it is reported on the config page and in girder's startup log instead. `trov:CanProvideInternetIsolation` is optional: without it, `submit_job` refuses any stage that asks for network isolation. The page and the log also warn when the profile's `@id` (or its url) names `sivacor.org` on a deployment whose `core.server_root` is not under `sivacor.org`, or is unset. |
 | `sivacor.stata_license` | set | Contents of `stata.lic`, fetched at run time by the step that needs it. Empty ⇒ Stata images cannot run. Seeded from `STATA_LICENSE_HOSTPATH` on first setup only. |
 | `sivacor.editors_group_name` | `Editors` | Group with editor privileges. |
 | `sivacor.uploads_folder_name` | `Uploads` | Per-user upload folder name. |
@@ -379,7 +379,8 @@ the box, this one from on it.
 its admin-user check on a database that already has an admin, saying *"nothing was
 changed"*. So the `.env` variables that *seed* settings —
 `GIRDER_SIVACOR_TRO_GPG_*`, `STATA_LICENSE_HOSTPATH` — are first-time-only, and every later
-change goes through the API or `girder-shell`. The one exception is the image allow-list, which has a config page
+change goes through the API or `girder-shell`. The exceptions are the image allow-list and, since
+girder-sivacor#157, the TRS profile (`sivacor.tro_profile`), which share a config page
 (Admin console → Plugins → SIVACOR, `#plugins/sivacor/config`).
 
 ### Upgrading past girder-sivacor#156 — store the allow-list first
