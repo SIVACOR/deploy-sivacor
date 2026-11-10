@@ -31,11 +31,29 @@ images:
 # whoever deploys it, and the failure of getting this wrong is the quiet one the
 # compose comment describes -- one warning per reap and an empty directory when someone
 # finally goes looking for a dump.
+#
+# The redis data directory is the same kind of outside-the-checkout bind source, and
+# its default is where production mounts its external volume. NOT chowned: the redis
+# entrypoint fixes ownership of /data itself, and re-owning a live broker's data from
+# here is exactly the kind of thing a redeploy must never do. `mkdir -p` on the
+# existing production directory is a no-op.
+#
+# The GPG keyring is deliberately checked, not created. An empty directory would
+# satisfy the bind mount, local_worker would start, and every submission would then
+# fail at its very last step, run_tro("sign") -- after the whole analysis had run.
 dirs: $(SUBDIRS)
 	@touch traefik/acme.json && chmod 600 traefik/acme.json
 	@if [ -f ./.env ]; then . ./.env; fi; \
 	  d="$${SIVACOR_DIAGNOSTICS_HOSTPATH:-/home/ubuntu/sivacor-diagnostics}"; \
-	  sudo mkdir -p "$$d" && sudo chown 1000:1000 "$$d"
+	  sudo mkdir -p "$$d" && sudo chown 1000:1000 "$$d"; \
+	  r="$${REDIS_DATA_HOSTPATH:-/home/ubuntu/redis_data}"; \
+	  sudo mkdir -p "$$r"; \
+	  g="$${GNUPG_HOSTPATH:-/home/ubuntu/.gnupg}"; \
+	  if ! sudo test -d "$$g"; then \
+	    echo "No GPG keyring at $$g. It holds the TRS signing key that signs every TRO;" >&2; \
+	    echo "create it, or point GNUPG_HOSTPATH in .env at the one you have." >&2; \
+	    exit 1; \
+	  fi
 
 $(SUBDIRS):
 	@sudo mkdir -p $@
@@ -76,6 +94,14 @@ services: dirs
 # its workers than on its manager. Shell `:-` nests; compose interpolation does not,
 # which is why this cannot live in the compose file.
 #
+# SIVACOR_MANAGER_QUEUES defaults by topology, because the right answer depends on
+# whether anything else runs submissions. Without the fleet the manager is the only
+# worker, so it must consume `sivacor` or no submission ever starts. With the fleet it
+# must NOT, or it keeps running analysis containers itself. Production and the mirror
+# both set it explicitly, so neither is reached by this default. The compose file's
+# own fallback stays the fleet value, so a bare `docker stack deploy` never turns the
+# manager back into a worker.
+#
 # SIVACOR_DEPLOYMENT defaults to `domain` for the same reason those two are derived:
 # it is a property of this deployment, and the failure it prevents is silent. It is the
 # tag the autoscaler puts on the instances it owns and requires of the ones it will
@@ -89,6 +115,8 @@ dev: services
 	  export SIVACOR_MANAGER_TENANT_IP="$${SIVACOR_MANAGER_TENANT_IP:-$$(ip -4 route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++) if($$i=="src") {print $$(i+1); exit}}')}" && \
 	  export SIVACOR_DEPLOYMENT="$${SIVACOR_DEPLOYMENT:-$${domain}}" && \
 	  export SIVACOR_WORKER_IMAGE="$${SIVACOR_WORKER_IMAGE:-$${GIRDER_SIVACOR_IMAGE:-docker.io/xarthisius/girder-sivacor:latest}}" && \
+	  if [ -n "$${SIVACOR_AUTOSCALING:-}" ]; then q=local,sivacor.static-01; else q=local,sivacor,sivacor.static-01; fi && \
+	  export SIVACOR_MANAGER_QUEUES="$${SIVACOR_MANAGER_QUEUES:-$$q}" && \
 	  autoscaler=""; \
 	  if [ -n "$${SIVACOR_AUTOSCALING:-}" ]; then \
 	    autoscaler="--compose-file docker-stack.autoscaler.yml"; \
@@ -100,6 +128,7 @@ dev: services
 	  fi; \
 	  echo "--- docker group on this host: $${docker_group} ---" && \
 	  echo "--- manager tenant ip: $${SIVACOR_MANAGER_TENANT_IP} ---" && \
+	  echo "--- manager queues: $${SIVACOR_MANAGER_QUEUES} ---" && \
 	  docker stack config --compose-file docker-stack.yml $${autoscaler} | docker stack deploy --compose-file - wt
 	cid=$$(docker ps --filter=name=wt_girder -q);
 	while [ -z $${cid} ] ; do \

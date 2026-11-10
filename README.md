@@ -39,12 +39,14 @@ OpenStack anything** — no `clouds.yaml`, no credentials. That is the sane way 
 - **A domain** you control, with DNS hosted at **Cloudflare** — Traefik requests a
   wildcard certificate over the DNS-01 challenge, so you need an API token, not just an
   A record. Point `girder`, `submit`, `vocabulary`, `feedback` and the apex at the VM.
-- **OAuth applications** at [ORCID](https://orcid.org/developer-tools) (the primary login
-  path) and [Globus](https://app.globus.org/settings/developers).
+- **An OAuth application** for each login provider you enable. The default is
+  [Globus](https://app.globus.org/settings/developers) only; set `GIRDER_OAUTH_PROVIDERS`
+  to add or switch to [ORCID](https://orcid.org/developer-tools).
 - **An SMTP account** for outgoing mail. Set `GIRDER_EMAIL_TO_CONSOLE` to skip this while
   testing.
-- **A GPG key** in `/home/ubuntu/.gnupg` on the manager. This is the TRS signing key —
+- **A GPG key** in `/home/ubuntu/.gnupg` on the manager (or wherever `GNUPG_HOSTPATH` points). This is the TRS signing key —
   every TRO the deployment produces is signed with it, so it is the deployment's identity.
+- `make`, `python3`
 - Optional: an **OpenStack application credential** if you want the worker fleet, and a
   **Stata license file** at `volumes/licenses/stata.lic.19` if you want Stata images.
 
@@ -58,7 +60,8 @@ make dev
 
 `make dev` creates the bind-mount directories, deploys the stack, waits for Girder, then
 runs `setup_girder.py` to create the admin user, the assetstore, CORS, OAuth and the
-SIVACOR settings. It prints the admin credentials at the end — **change the password**.
+SIVACOR settings. The admin's password is `GIRDER_ADMIN_PASSWORD` from `.env`, which
+first setup requires.
 
 > **Every line of `.env` must start with `export`.** The Makefile sources it and passes
 > the environment to `docker stack config`. Without `export`, only `REDIS_PASSWORD` fails
@@ -77,11 +80,11 @@ Roughly half of what you can configure is **not** in `.env`.
   requires a redeploy.
 - **Girder settings** (`sivacor.*`, in MongoDB) — policy: the worker-size catalogue, the
   scratch-volume switch and budget, retention and runtime caps, targeted assignment. Set
-  through the admin UI, the settings API, or `girder-shell` on the manager. Most take
+  through the settings API or `girder-shell` on the manager (there is no admin UI for them). Most take
   effect without a redeploy.
 
 `setup_girder.py` seeds the second plane **only on a database with no admin user**. On an
-existing deployment it exits early and still prints "You should be all set!!" — so editing
+existing deployment it exits early, changing nothing — so editing
 `.env` and re-running `make dev` does not change a Girder setting. Change those through
 the API.
 

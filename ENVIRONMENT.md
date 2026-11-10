@@ -23,12 +23,13 @@ has to contain.
 | Variable | Purpose |
 |---|---|
 | `domain` | Public domain, e.g. `sivacor.org`. Used for every Traefik host rule and for `worker.api_url`. |
-| `docker_group` | Host GID of the `docker` group (`getent group docker \| cut -d: -f3`). Feeds `GOSU_USER`, which **nothing reads** — see *Docker socket access* below. Must be `112` for the socket to work, because the image hardcodes that GID. |
+| `docker_group` | **Discovered by the Makefile, do not set it.** Host GID of the `docker` group; becomes `local_worker`'s primary group (`user: 1000:${docker_group}`), which is how it reaches the socket. An explicit value still wins. See *Docker socket access* below. |
 | `CF_DNS_API_TOKEN` | Cloudflare token for Traefik's ACME DNS-01 challenge. |
-| `GIRDER_SMTP_USERNAME` / `GIRDER_SMTP_PASSWORD` | Outgoing mail on `mail.spacemail.com`. |
-| `GLOBUS_CLIENT_ID` / `GLOBUS_CLIENT_SECRET` | Globus OAuth. |
-| `ORCID_CLIENT_ID` / `ORCID_CLIENT_SECRET` | ORCID OAuth (the primary login path). |
-| `GIRDER_SIVACOR_TRO_GPG_FINGERPRINT` / `GIRDER_SIVACOR_TRO_GPG_PASSPHRASE` | TRS signing key, for `run_tro("sign")`. **Read only on a first-time setup.** `setup_girder.py` seeds these into `sivacor.tro_gpg_fingerprint` / `sivacor.tro_gpg_passphrase`, but it exits at its admin-user check on any database that already has an admin — so editing them here and re-running `make dev` changes nothing, and still prints "You should be all set!!". Change them through the settings API or the admin UI. Same applies to `sivacor.stata_license` from `STATA_LICENSE_HOSTPATH`. See *Deployment traps* 6 in `01_autoscaling_plan.md`. |
+| `GIRDER_SMTP_USERNAME` / `GIRDER_SMTP_PASSWORD` | Outgoing mail credentials, for the relay `GIRDER_SMTP_HOST` names. |
+| `GLOBUS_CLIENT_ID` / `GLOBUS_CLIENT_SECRET` | Globus OAuth. Required while `GIRDER_OAUTH_PROVIDERS` includes `globus`, which it does by default. |
+| `ORCID_CLIENT_ID` / `ORCID_CLIENT_SECRET` | ORCID OAuth. Only used if `GIRDER_OAUTH_PROVIDERS` includes `orcid`; **production carries these with ORCID switched off**. |
+| `GIRDER_ADMIN_PASSWORD` | Password of the `admin` account `setup_girder.py` creates. **Read only on a first-time setup**, and required only then: on a database that already has an admin the script never reads it, so an existing deployment's `.env` does not need it. Never printed. |
+| `GIRDER_SIVACOR_TRO_GPG_FINGERPRINT` / `GIRDER_SIVACOR_TRO_GPG_PASSPHRASE` | TRS signing key, for `run_tro("sign")`. **Read only on a first-time setup.** `setup_girder.py` seeds these into `sivacor.tro_gpg_fingerprint` / `sivacor.tro_gpg_passphrase`, but it exits at its admin-user check on any database that already has an admin — so editing them here and re-running `make dev` changes nothing (it says so: *"nothing was changed"*). Change them through the settings API or `girder-shell` — there is no admin UI for `sivacor.*` settings. Same applies to `sivacor.stata_license` from `STATA_LICENSE_HOSTPATH`. See *Deployment traps* 6 in `01_autoscaling_plan.md`. |
 | `MASTER_KEY_HEX` | See below. |
 | `REDIS_PASSWORD` | See below. **New — an existing `.env` without it will refuse to deploy.** |
 
@@ -40,12 +41,16 @@ existing `.env` needs none of them.
 | Variable | Default | Purpose |
 |---|---|---|
 | `GIRDER_API_KEY` | unset | See below — **not required** for the co-located worker. |
-| `GIRDER_ADMIN_EMAIL` | `admin@sivacor.org` | Contact + envelope-sender address. Deliberately **not** derived from `domain`: it has to be a mailbox the `mail.spacemail.com` account is authorized to send as, so on a test domain the default is usually still what you want. |
+| `GIRDER_ADMIN_EMAIL` | `admin@sivacor.org` | Contact + envelope-sender address, and the `admin` account's email at first setup (`root@sivacor.org` if unset). Deliberately **not** derived from `domain`: it has to be a mailbox the `mail.spacemail.com` account is authorized to send as, so on a test domain the default is usually still what you want. |
 | `GIRDER_SIVACOR_IMAGE` | `docker.io/xarthisius/girder-sivacor:latest` | Backend image for `girder`, `beat` and `local_worker`. Point at a branch tag to test one. |
 | `AEA_SIVACOR_IMAGE` | `xarthisius/aea-sivacor:latest` | Frontend image for `submit`. |
-| `SIVACOR_MANAGER_QUEUES` | `local,sivacor,sivacor.static-01` | `local_worker`'s `--queues`. Drop `sivacor` to stop the manager accepting submissions once a remote worker exists. |
+| `SIVACOR_MANAGER_QUEUES` | `local,sivacor,sivacor.static-01` without `SIVACOR_AUTOSCALING`; `local,sivacor.static-01` with it (derived by the Makefile) | `local_worker`'s `--queues`. `local` must always stay: it is Girder core's own queue (`deleteFolderTask`, `importDataTask`), core returns 503 if nothing consumes it — breaking submission deletion — and the retention sweep and reaper ride it too. `sivacor` is the shared dispatch queue: consuming it makes the manager run analysis containers itself, which is right only when there is no fleet. `sivacor.static-01` drains chains already pinned to the manager. Production and the mirror both set this explicitly. A bare `docker stack deploy` without the Makefile falls back to the fleet value, so it never turns the manager back into a worker. **A stack without the fleet must also leave `sivacor.targeted_assignment` unarmed** — armed, submissions go to private queues that only fleet workers consume. |
 | `DOCKER_HOST_TMP_ROOT` | `/home/ubuntu/deploy-sivacor/volumes` | Host path `lib.py` builds sibling-container bind-mount sources from. Matches the production checkout; set it per host if yours differs. A wrong value does not error — Docker creates an empty directory at the missing mount source, and Stata then reports no valid license. |
-| `STATA_LICENSE_HOSTPATH` | `…/deploy-sivacor/volumes/licenses/stata.lic.19` | Same caveat. |
+| `STATA_LICENSE_HOSTPATH` | `…/deploy-sivacor/volumes/licenses/stata.lic.19` | Same caveat. `setup_girder.py` seeds `sivacor.stata_license` from it on first setup, and leaves the setting out if the file is absent. |
+| `REDIS_DATA_HOSTPATH` | `/home/ubuntu/redis_data` | Host directory holding the broker's data — production's default is where its external volume is mounted. `make dirs` creates it (no `chown`: the redis entrypoint fixes ownership). **Changing it on a live deployment starts the broker on an empty directory**: queued submissions and pending logs are lost unless the data is moved first. |
+| `GNUPG_HOSTPATH` | `/home/ubuntu/.gnupg` | Host GPG keyring holding the TRS signing key, bind-mounted into `local_worker` only — off-box workers hold no key. It is the deployment's identity: every TRO is signed with it. Must be readable by uid 1000. `make dirs` **refuses to deploy** if it is missing rather than creating it, because an empty directory would start fine and fail every submission at `run_tro("sign")`, after the analysis had run. |
+| `GIRDER_SMTP_HOST` / `GIRDER_SMTP_PORT` / `GIRDER_SMTP_ENCRYPTION` | `mail.spacemail.com` / `465` / `ssl` | Outgoing mail relay, for `girder`, `beat` and `local_worker` alike. |
+| `GIRDER_OAUTH_PROVIDERS` | `globus` | Comma-separated login providers (`globus`, `orcid`) seeded into `oauth.providers_enabled` **on first setup only**. Explicit rather than derived from which client ids are set, because production carries ORCID credentials with ORCID deliberately off. `setup_girder.py` refuses a provider whose `*_CLIENT_ID` is unset, before creating anything — an enabled provider with no app makes the login page show *Authentication Error*. |
 | `GIRDER_EMAIL_TO_CONSOLE` | unset | Any **non-empty** value makes `notifications.py:_submitEmail` print the message to stdout and return before touching SMTP. Lets a test stack run with blank `GIRDER_SMTP_*`. Read the mail with `docker service logs -f wt_girder` — the `jobs.job.update.after` handler runs in the Girder server, so that is where submission mail is emitted, not the worker. **Note:** it is a bare truthiness check, so `false` also redirects; leave it unset to send for real. |
 | `TRAEFIK_LOG_LEVEL` | `INFO` | Traefik's own default is `ERROR`, which makes certificate problems invisible. Use `DEBUG` to see lego's DNS-01 challenge steps when a cert is not appearing. Passed as a CLI flag because `traefik/config.yml` is a bind mount and is never interpolated. |
 | `DOCS_URL` | `https://docs.sivacor.org/` | Where the apex host redirects. |
@@ -128,52 +133,31 @@ had zero servers. They also no longer carry their own `certResolver` — the
 wildcard covers both the apex (as `main`) and `feedback.$domain` (as `*.`), so
 this is two fewer certificates to issue.
 
-## Docker socket access — `GOSU_USER` is inert, GID 112 is hardcoded
+## Docker socket access — the host's GID, discovered at deploy time
 
-`girder` and `local_worker` both set `GOSU_USER=1000:1000:${docker_group}`.
-**Nothing reads that variable.** Verified 2026-07-30:
+`local_worker` is the one Swarm service that needs the docker socket, and it gets it
+from its **primary group**: `user: "1000:${docker_group}"`, where the Makefile fills
+`docker_group` from `getent group docker` on the deploying host. The host's GID does
+**not** need to match anything baked into the image.
 
-| Checked | Result |
-|---|---|
-| `girder-sivacor` base image | `FROM python:3.12-slim` — no WholeTale base, nothing inherited |
-| entrypoint scripts in the image | none; `ENTRYPOINT` is the gunicorn line directly |
-| `gosu` binary in the image | absent |
-| `GOSU_USER` in `girder_sivacor/**` (py, sh) | zero hits |
-| `GOSU_USER` in the girder source (excluding `venv/`) | zero hits |
+This replaces an older arrangement, recorded here because the old advice still
+circulates: the image used to bake `groupadd -g 112 docker` as a literal, so the socket
+worked only on a host whose docker GID was 112, and `GOSU_USER` /`docker_group` were
+vestigial. A fresh JS2 Ubuntu 24.04 host came up with **127**, which is what retired the
+"JS2 is always 112" assumption. The image's GID is now a build arg (`DOCKER_GID`,
+default 112) and only a fallback; **do not `groupmod` the host to 112**.
 
-What actually grants socket access is baked into the image at build time —
-`girder-sivacor/Dockerfile:98`:
+- **Swarm cannot use `--group-add`** — `docker stack config` rejects compose's
+  `group_add` — so the primary group is the only lever, hence the `user:` line.
+- **The worker VM** passes `--group-add <discovered GID>` on `docker run` in
+  `worker-cloud-init.sh` instead.
+- **`GOSU_USER` on `girder` is still inert**: nothing in the image reads it (no `gosu`,
+  no entrypoint script). It is WholeTale-era config kept only because removing it is a
+  separate change.
 
-```dockerfile
-RUN groupadd -g 1000 girder && groupadd -g 112 docker \
- && useradd -g 1000 -G 112 -u 1000 -m -s /bin/bash girder
-```
-
-So the container's `girder` user is in **GID 112**, and the docker socket is
-readable if and only if the *host's* docker GID is also 112. JS2 hosts are 112,
-which is why this works in production and on the test stack.
-
-**Why this matters.** `docker_group` looks like the per-host knob and is not. On a
-host with a different docker GID, setting it correctly changes nothing: the
-container still cannot open the socket, no analysis container can start, and the
-only symptom is a `PermissionError(13)` from docker-py buried in a worker
-traceback. Check the host before assuming:
-
-```sh
-getent group docker | cut -d: -f3        # must be 112
-```
-
-**The worker VM does not have this problem.** `deploy-sivacor/worker-cloud-init.sh`
-passes `--group-add <discovered GID>` on `docker run`, which adds the host's real
-GID as a supplementary group regardless of what the image baked in.
-
-**The Swarm services cannot use that fix.** `docker stack config` rejects
-compose's `group_add` (`Additional property group_add is not allowed`), so there
-is no stack-file equivalent. The durable fix is to make the GID a build arg in
-`girder-sivacor/Dockerfile` instead of a literal, at which point `docker_group`
-could become meaningful. Until then, treat "host docker GID == 112" as a
-deployment precondition, and `GOSU_USER` / `docker_group` as vestigial
-(WholeTale-era) config kept only because removing it is a separate change.
+If an analysis container cannot start with `PermissionError(13)` from docker-py, check
+`docker service inspect wt_local_worker --format '{{.Spec.TaskTemplate.ContainerSpec.User}}'`
+against `getent group docker | cut -d: -f3`.
 
 ## Pointing the UI at the right API
 
@@ -370,10 +354,10 @@ the sense that it calls them directly; a bad value still raises. Use the REST ro
 the box, this one from on it.
 
 **`setup_girder.py` will not update any of these on an existing deployment.** It exits at
-its admin-user check on a database that already has an admin, printing *"You should be all
-set!!"* while changing nothing. So the `.env` variables that *seed* settings —
+its admin-user check on a database that already has an admin, saying *"nothing was
+changed"*. So the `.env` variables that *seed* settings —
 `GIRDER_SIVACOR_TRO_GPG_*`, `STATA_LICENSE_HOSTPATH` — are first-time-only, and every later
-change goes through the API or the admin UI.
+change goes through the API or `girder-shell` (there is no admin UI for `sivacor.*` settings).
 
 ### Girder *core* settings, set from the environment
 
@@ -387,11 +371,11 @@ Written out in full rather than abbreviated, so grepping for the name you see in
 
 | Variable | Fed from | Purpose |
 |---|---|---|
-| `GIRDER_SETTING_CORE_SMTP_HOST` | `.env` | Mail relay (`mail.spacemail.com`). |
-| `GIRDER_SETTING_CORE_SMTP_PORT` | stack file | Relay port. |
+| `GIRDER_SETTING_CORE_SMTP_HOST` | `GIRDER_SMTP_HOST` | Mail relay (default `mail.spacemail.com`). |
+| `GIRDER_SETTING_CORE_SMTP_PORT` | `GIRDER_SMTP_PORT` | Relay port (default `465`). |
 | `GIRDER_SETTING_CORE_SMTP_USERNAME` | `GIRDER_SMTP_USERNAME` | Relay credential. |
 | `GIRDER_SETTING_CORE_SMTP_PASSWORD` | `GIRDER_SMTP_PASSWORD` | Relay credential. **Secret** — it is in the service definition, so `docker service inspect` prints it. |
-| `GIRDER_SETTING_CORE_SMTP_ENCRYPTION` | stack file | TLS/SSL/none. Blank credentials plus `GIRDER_EMAIL_TO_CONSOLE` is the test-stack combination. |
+| `GIRDER_SETTING_CORE_SMTP_ENCRYPTION` | `GIRDER_SMTP_ENCRYPTION` | TLS/SSL/none (default `ssl`). Blank credentials plus `GIRDER_EMAIL_TO_CONSOLE` is the test-stack combination. |
 | `GIRDER_SETTING_CORE_EMAIL_FROM_ADDRESS` | `GIRDER_ADMIN_EMAIL` | Envelope sender. Must be a mailbox the SMTP account may send as. |
 | `GIRDER_SETTING_CORE_CONTACT_EMAIL_ADDRESS` | `GIRDER_ADMIN_EMAIL` | The address users are told to write to. |
 | `GIRDER_SETTING_CORE_EMAIL_HOST` | `https://girder.$domain` | **Base URL Girder puts in the links it mails** — password resets, verification. Wrong here means mail that arrives and cannot be acted on, which no test of *sending* catches. |

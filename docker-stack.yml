@@ -146,10 +146,10 @@ services:
       - GIRDER_SETTING_CORE_EMAIL_FROM_ADDRESS=SIVACOR Admin <${GIRDER_ADMIN_EMAIL:-admin@sivacor.org}>
       - GIRDER_SETTING_CORE_EMAIL_HOST=https://girder.${domain}
       - GIRDER_SETTING_CORE_REGISTRATION_POLICY=open
-      - GIRDER_SETTING_CORE_SMTP_ENCRYPTION=ssl
-      - GIRDER_SETTING_CORE_SMTP_HOST=mail.spacemail.com
+      - GIRDER_SETTING_CORE_SMTP_ENCRYPTION=${GIRDER_SMTP_ENCRYPTION:-ssl}
+      - GIRDER_SETTING_CORE_SMTP_HOST=${GIRDER_SMTP_HOST:-mail.spacemail.com}
       - GIRDER_SETTING_CORE_SMTP_PASSWORD=${GIRDER_SMTP_PASSWORD}
-      - GIRDER_SETTING_CORE_SMTP_PORT=465
+      - GIRDER_SETTING_CORE_SMTP_PORT=${GIRDER_SMTP_PORT:-465}
       - GIRDER_SETTING_CORE_SMTP_USERNAME=${GIRDER_SMTP_USERNAME}
       # Any NON-EMPTY value dumps mail to stdout instead of sending it --
       # including the string "false", since notifications.py:154 is a bare
@@ -199,7 +199,12 @@ services:
       - mongo
     volumes:
       - ./volumes:/srv/data
-      - /home/ubuntu/.gnupg:/home/girder/.gnupg
+      # The TRS signing keyring -- the deployment's identity. Only this service
+      # signs; off-box workers hold no key (worker-cloud-init.sh refuses to boot
+      # with one). `make dev` refuses to deploy if the directory is missing,
+      # because an empty bind source would start fine and fail every run at
+      # its very last step, run_tro("sign").
+      - ${GNUPG_HOSTPATH:-/home/ubuntu/.gnupg}:/home/girder/.gnupg
       - /var/run/docker.sock:/var/run/docker.sock
       - ./volumes/tmp:/tmp
     environment:
@@ -217,10 +222,10 @@ services:
       - GIRDER_SETTING_CORE_CONTACT_EMAIL_ADDRESS=${GIRDER_ADMIN_EMAIL:-admin@sivacor.org}
       - GIRDER_SETTING_CORE_EMAIL_FROM_ADDRESS=SIVACOR Admin <${GIRDER_ADMIN_EMAIL:-admin@sivacor.org}>
       - GIRDER_SETTING_CORE_EMAIL_HOST=https://girder.${domain}
-      - GIRDER_SETTING_CORE_SMTP_ENCRYPTION=ssl
-      - GIRDER_SETTING_CORE_SMTP_HOST=mail.spacemail.com
+      - GIRDER_SETTING_CORE_SMTP_ENCRYPTION=${GIRDER_SMTP_ENCRYPTION:-ssl}
+      - GIRDER_SETTING_CORE_SMTP_HOST=${GIRDER_SMTP_HOST:-mail.spacemail.com}
       - GIRDER_SETTING_CORE_SMTP_PASSWORD=${GIRDER_SMTP_PASSWORD}
-      - GIRDER_SETTING_CORE_SMTP_PORT=465
+      - GIRDER_SETTING_CORE_SMTP_PORT=${GIRDER_SMTP_PORT:-465}
       - GIRDER_SETTING_CORE_SMTP_USERNAME=${GIRDER_SMTP_USERNAME}
       # Any NON-EMPTY value dumps mail to stdout instead of sending it --
       # including the string "false", since notifications.py:154 is a bare
@@ -308,10 +313,10 @@ services:
       - GIRDER_SETTING_CORE_CONTACT_EMAIL_ADDRESS=${GIRDER_ADMIN_EMAIL:-admin@sivacor.org}
       - GIRDER_SETTING_CORE_EMAIL_FROM_ADDRESS=SIVACOR Admin <${GIRDER_ADMIN_EMAIL:-admin@sivacor.org}>
       - GIRDER_SETTING_CORE_EMAIL_HOST=https://girder.${domain}
-      - GIRDER_SETTING_CORE_SMTP_ENCRYPTION=ssl
-      - GIRDER_SETTING_CORE_SMTP_HOST=mail.spacemail.com
+      - GIRDER_SETTING_CORE_SMTP_ENCRYPTION=${GIRDER_SMTP_ENCRYPTION:-ssl}
+      - GIRDER_SETTING_CORE_SMTP_HOST=${GIRDER_SMTP_HOST:-mail.spacemail.com}
       - GIRDER_SETTING_CORE_SMTP_PASSWORD=${GIRDER_SMTP_PASSWORD}
-      - GIRDER_SETTING_CORE_SMTP_PORT=465
+      - GIRDER_SETTING_CORE_SMTP_PORT=${GIRDER_SMTP_PORT:-465}
       - GIRDER_SETTING_CORE_SMTP_USERNAME=${GIRDER_SMTP_USERNAME}
       # Any NON-EMPTY value dumps mail to stdout instead of sending it --
       # including the string "false", since notifications.py:154 is a bare
@@ -364,7 +369,9 @@ services:
     networks:
       - celery
     volumes:
-      - /home/ubuntu/redis_data:/data
+      # Where production mounts its external volume; `make dirs` creates it.
+      # Changing it on a live deployment starts the broker empty.
+      - ${REDIS_DATA_HOSTPATH:-/home/ubuntu/redis_data}:/data
     # Off-box workers reach the broker here, so it is no longer purely internal.
     # The celery message carries an admin-scoped Girder token in plaintext,
     # which makes broker confidentiality a security boundary, not a nicety.
