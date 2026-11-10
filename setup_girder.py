@@ -54,17 +54,17 @@ def girder_error(r):
 
 # Stata license, seeded into the sivacor.stata_license setting so ephemeral
 # workers can fetch it at run time (plan D7 / item 3b). Git-ignored, like the
-# rest of volumes/; absent is fine and just means no Stata support.
+# rest of volumes/; absent is fine and just means no Stata support. Read up
+# front but reported only when it is actually seeded, below -- on an existing
+# deployment nothing is.
 stata_license_path = os.environ.get(
     "STATA_LICENSE_HOSTPATH", "volumes/licenses/stata.lic.19"
 )
 try:
     with open(stata_license_path) as fp:
         stata_license = fp.read().strip()
-    print(f"--- seeding Stata license from {stata_license_path} ---")
 except OSError:
     stata_license = None
-    print(f"--- no Stata license at {stata_license_path}; Stata images disabled ---")
 
 # Which OAuth providers the login page offers. Explicit rather than derived
 # from which client ids are set: production carries ORCID credentials with
@@ -260,7 +260,10 @@ settings = [
 # time. Not sent as "": the plugin's validator rejects an empty license, and
 # that rejection would fail the whole settings request.
 if stata_license is not None:
+    print(f"--- seeding Stata license from {stata_license_path} ---")
     settings.append({"key": "sivacor.stata_license", "value": stata_license})
+else:
+    print(f"--- no Stata license at {stata_license_path}; Stata images disabled ---")
 
 
 r = requests.put(
