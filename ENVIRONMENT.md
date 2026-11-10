@@ -50,6 +50,7 @@ existing `.env` needs none of them.
 | `REDIS_DATA_HOSTPATH` | `/home/ubuntu/redis_data` | Host directory holding the broker's data — production's default is where its external volume is mounted. `make dirs` creates it (no `chown`: the redis entrypoint fixes ownership). **Changing it on a live deployment starts the broker on an empty directory**: queued submissions and pending logs are lost unless the data is moved first. |
 | `GNUPG_HOSTPATH` | `/home/ubuntu/.gnupg` | Host GPG keyring holding the TRS signing key, bind-mounted into `local_worker` only — off-box workers hold no key. It is the deployment's identity: every TRO is signed with it. Must be readable by uid 1000. `make dirs` **refuses to deploy** if it is missing rather than creating it, because an empty directory would start fine and fail every submission at `run_tro("sign")`, after the analysis had run. |
 | `GIRDER_SMTP_HOST` / `GIRDER_SMTP_PORT` / `GIRDER_SMTP_ENCRYPTION` | `mail.spacemail.com` / `465` / `ssl` | Outgoing mail relay, for `girder`, `beat` and `local_worker` alike. |
+| `SIVACOR_SUPPORT_EMAIL` | unset | Seeds `sivacor.support_email` **on first setup only**, so a third-party deployment does not send its users to SIVACOR's support. Unset leaves the setting at the plugin default, `support@sivacor.org`; later changes go through the settings API. Not `GIRDER_ADMIN_EMAIL`, which is the mail sender. |
 | `GIRDER_OAUTH_PROVIDERS` | `globus` | Comma-separated login providers (`globus`, `orcid`) seeded into `oauth.providers_enabled` **on first setup only**. Explicit rather than derived from which client ids are set, because production carries ORCID credentials with ORCID deliberately off. `setup_girder.py` refuses a provider whose `*_CLIENT_ID` is unset, before creating anything — an enabled provider with no app makes the login page show *Authentication Error*. |
 | `GIRDER_EMAIL_TO_CONSOLE` | unset | Any **non-empty** value makes `notifications.py:_submitEmail` print the message to stdout and return before touching SMTP. Lets a test stack run with blank `GIRDER_SMTP_*`. Read the mail with `docker service logs -f wt_girder` — the `jobs.job.update.after` handler runs in the Girder server, so that is where submission mail is emitted, not the worker. **Note:** it is a bare truthiness check, so `false` also redirects; leave it unset to send for real. |
 | `TRAEFIK_LOG_LEVEL` | `INFO` | Traefik's own default is `ERROR`, which makes certificate problems invisible. Use `DEBUG` to see lego's DNS-01 challenge steps when a cert is not appearing. Passed as a CLI flag because `traefik/config.yml` is a bind mount and is never interpolated. |
@@ -290,7 +291,7 @@ the sweeps do not need one.
 
 ## Girder settings — the other plane, and the whole list
 
-**This file is a `.env` reference, and `.env` is only half of the configuration.** Nineteen
+**This file is a `.env` reference, and `.env` is only half of the configuration.** Twenty-one
 `sivacor.*` settings live in **MongoDB**, not in the environment, and the two planes behave
 differently in the way that matters most: a `.env` change needs `make dev`, while almost
 every setting below is read **per request or per controller tick**, so it takes effect
@@ -320,23 +321,42 @@ where it differs (`girder_sivacor/settings.py` is the authority for defaults).
 | `sivacor.stata_license` | set | Contents of `stata.lic`, fetched at run time by the step that needs it. Empty ⇒ Stata images cannot run. Seeded from `STATA_LICENSE_HOSTPATH` on first setup only. |
 | `sivacor.editors_group_name` | `Editors` | Group with editor privileges. |
 | `sivacor.uploads_folder_name` | `Uploads` | Per-user upload folder name. |
+| `sivacor.support_email` | [`support@sivacor.org`] (added after the 2026-08-22 read) | Where researcher-facing messages, mail and the web UI's Contact Support send people. **Public**: served unauthenticated by `GET /system/public_settings`, which is how the UI reads it. Deliberately separate from `core.contact_email_address`, which `GIRDER_ADMIN_EMAIL` pins as the mail *sender*. Seeded from `SIVACOR_SUPPORT_EMAIL` on first setup only, and only if that is set. |
+| `sivacor.pseudonym_salt` | generated on first use (added after the 2026-08-22 read) | HMAC key for the pseudonyms a redacted chain job carries in place of a user id. **A secret** in the same class as `tro_gpg_passphrase`: never log, export or copy it. Never rotate it either, because that splits every cohort in two. **Deleting it is the kill switch**: every pseudonym ever written becomes unlinkable. |
 | `sivacor.submission_collection_name` | `Submissions` | Collection holding submission folders. Renaming it orphans every existing submission. |
 
-**Read and write them with query parameters, never a body.**
+**Write them as a urlencoded form, never as JSON.**
 
 ```sh
 API=https://girder.$domain/api/v1
 get()  { curl -s -H "Girder-Token: $TOKEN" "$API/system/setting?key=$1"; }
-set_() { curl -s -X PUT -H "Girder-Token: $TOKEN" -G \
+set_() { curl -s -X PUT -H "Girder-Token: $TOKEN" \
            --data-urlencode "key=$1" --data-urlencode "value=$2" "$API/system/setting"; }
 ```
 
-**A urlencoded body returns 200 having changed nothing.** This has cost a whole end-to-end
-run twice. Always read back what you wrote, and note booleans must be real JSON (`true`,
-not `"true"` — a truthy string arms a path the validator is trying to protect).
+**A JSON body returns 200 having changed nothing.** `PUT /system/setting` with
+`Content-Type: application/json` is accepted and ignored, so the only symptom is a value
+that never changes. A silent no-op has cost a whole end-to-end run twice, on `deploy-dev`
+in 2026-08 (`aea-sivacor/e2e/lib.mjs`, `setSetting`). What that first helper sent was never
+committed, so whether a JSON body was the cause there is not known. Measured directly
+against the girder container (not through Traefik) on Girder 5.0.23
+(`girder-sivacor:latest`, 2026-11-10):
 
-**On the manager, `girder-shell` is the better route** — no token, no URL encoding, and the
-body-versus-query-parameter trap cannot happen because there is no request:
+| Request | Result |
+|---|---|
+| urlencoded body, `key`+`value` or `list` | stored |
+| JSON body | **200, nothing stored** |
+| query parameters, no body (`curl -X PUT -G`) | stored only with `-H 'Content-Length: 0'`; without it, **411** sent straight to Girder |
+| `value=true` vs `value="true"` | a boolean vs a string, which a type-checking validator rejects |
+
+This section used to blame the silent no-op on a *urlencoded* body and recommend the `-G`
+form. On that version neither holds. Whatever the cause was then, read back what you wrote,
+as `setup_girder.py` and `setSetting` both do. Note also that booleans must be real JSON
+(`true`, not `"true"`), because where a validator does not check the type, a truthy string
+arms the path it is trying to protect.
+
+**On the manager, `girder-shell` is the better route** — no token, no URL encoding, and
+there is no request body to get wrong:
 
 ```sh
 docker exec -ti $(docker ps --filter=name=wt_girder -q) girder-shell

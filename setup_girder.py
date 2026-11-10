@@ -6,7 +6,9 @@ nothing and exits 0 -- which is what makes `make dev` safe to use as the
 redeploy command on a deployment holding data. Do not teach it to "carry on"
 on an existing database: everything below would overwrite live settings.
 
-Every request sends its parameters in the form body, never in the URL. Traefik's
+Every request sends its parameters in a urlencoded form body, never in the
+URL, and never as JSON: Girder answers a JSON-bodied PUT /system/setting with
+200 having changed nothing, which is why every setting is read back below. Traefik's
 access log keeps every 4xx together with its query string, so a URL parameter
 is a credential written to disk on any failure -- the admin password on
 `POST /user`, the GPG passphrase on `PUT /system/setting`.
@@ -196,7 +198,9 @@ print("Setting up Plugin")
 settings = [
     {
         "key": "core.cors.allow_origin",
-        "value": f"http://localhost:4200,https://submit.{domain}",
+        # Written the way Girder's validator normalises it (", "-joined), so
+        # the read-back below compares equal. Stored value is unchanged.
+        "value": f"http://localhost:4200, https://submit.{domain}",
     },
     {
         "key": "core.cors.allow_headers",
@@ -265,12 +269,45 @@ if stata_license is not None:
 else:
     print(f"--- no Stata license at {stata_license_path}; Stata images disabled ---")
 
+# Where researcher-facing messages, mail and the web UI's Contact Support send
+# people. Seeded only when given, so a deployment that sets nothing keeps the
+# plugin's default (support@sivacor.org) rather than a copy of it.
+# Deliberately not GIRDER_ADMIN_EMAIL: that is the mail sender.
+if os.environ.get("SIVACOR_SUPPORT_EMAIL"):
+    settings.append(
+        {"key": "sivacor.support_email", "value": os.environ["SIVACOR_SUPPORT_EMAIL"]}
+    )
+
+# An unset .env variable is left out rather than sent as null, so the setting
+# keeps the plugin's default and the read-back below has something definite to
+# compare. Named, never valued: some of these are secrets.
+for unset in [item["key"] for item in settings if item["value"] is None]:
+    print(f"--- not set in .env, left at the default: {unset} ---")
+settings = [item for item in settings if item["value"] is not None]
+
 
 r = requests.put(
     api_url + "/system/setting", headers=headers, data={"list": json.dumps(settings)}
 )
 if not r.ok:
     fail(girder_error(r))
+
+# A 200 is not proof anything was stored (see the docstring), so check. Keys go
+# in the URL; values never do, and a mismatch is reported by key alone.
+r = requests.get(
+    api_url + "/system/setting",
+    headers=headers,
+    params={"list": json.dumps([item["key"] for item in settings])},
+)
+if not r.ok:
+    fail(girder_error(r))
+stored = r.json()
+mismatched = [item["key"] for item in settings if stored.get(item["key"]) != item["value"]]
+if mismatched:
+    fail(
+        "Girder accepted the settings but did not store: " + ", ".join(mismatched)
+        + ". Nothing was rolled back; fix the cause, then `make clean && make dev`."
+    )
 
 print("-------------- You should be all set!! -------------")
 print(f"Log in at https://girder.{domain} as `admin`, with GIRDER_ADMIN_PASSWORD.")
