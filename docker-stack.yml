@@ -454,6 +454,42 @@ services:
         - "traefik.http.middlewares.feedback-redirect.redirectregex.replacement=${FEEDBACK_URL:-https://cornell.ca1.qualtrics.com/jfe/form/SV_bEnajmkM2qKBr0O}"
         - "traefik.http.middlewares.feedback-redirect.redirectregex.permanent=false"
 
+  # Web Key Directory for ${domain} (SIVACOR/documentation#36): lets anyone
+  # fetch the TRS signing key from the domain itself, e.g.
+  #   gpg --locate-external-keys editors@sivacor.org
+  # which is how a verifier ties the key embedded in a TRO to SIVACOR without
+  # trusting the TRO. Static files built by `make wkd` (build-wkd.sh) from this
+  # deployment's own keyring; nothing here holds a secret.
+  #
+  # It has to be openpgpkey.${domain}, not the apex: the *.sivacor.org wildcard
+  # makes that name resolve, and gpg then uses only the "advanced" URL and never
+  # falls back. The wildcard certificate already covers the name.
+  #
+  # The spec requires `Access-Control-Allow-Origin: *` (browser clients) and
+  # application/octet-stream, which nginx's default_type already gives the
+  # extensionless hu/ files.
+  openpgpkey:
+    image: nginx:1.27.5-alpine
+    networks:
+      - proxy
+    volumes:
+      - ./volumes/wkd:/usr/share/nginx/html/.well-known/openpgpkey:ro
+    deploy:
+      replicas: 1
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.openpgpkey.rule=Host(`openpgpkey.${domain}`)"
+        - "traefik.http.routers.openpgpkey.entrypoints=https"
+        - "traefik.http.routers.openpgpkey.tls=true"
+        - "traefik.http.routers.openpgpkey.middlewares=openpgpkey-headers"
+        - "traefik.http.middlewares.openpgpkey-headers.headers.customresponseheaders.Access-Control-Allow-Origin=*"
+        - "traefik.http.services.openpgpkey.loadbalancer.server.port=80"
+        - "traefik.swarm.network=wt_proxy"
+      # Bind mount from this node, which is where `make wkd` writes.
+      placement:
+        constraints:
+          - "node.role == manager"
+
 networks:
   mongo:
     driver: overlay

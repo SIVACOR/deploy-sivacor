@@ -26,6 +26,7 @@ One Swarm stack, named `wt`, on a single manager node:
 | `beat` | Periodic tasks (retention sweep) |
 | `mongo`, `redis` | Database and broker |
 | `vocabulary` | Static `sivacor:` vocabulary host, plus the apex and feedback redirects |
+| `openpgpkey` | Web Key Directory: publishes the TRS signing key at `openpgpkey.$domain`, so `gpg --locate-external-keys` can fetch it from the domain |
 | `autoscaler` | **Optional** — creates and reaps OpenStack worker VMs from demand |
 
 Without the autoscaler, submissions run on the manager and **the stack needs no
@@ -38,7 +39,8 @@ OpenStack anything** — no `clouds.yaml`, no credentials. That is the sane way 
   fleet, so size it accordingly.
 - **A domain** you control, with DNS hosted at **Cloudflare** — Traefik requests a
   wildcard certificate over the DNS-01 challenge, so you need an API token, not just an
-  A record. Point `girder`, `submit`, `vocabulary`, `feedback` and the apex at the VM.
+  A record. Point `girder`, `submit`, `vocabulary`, `feedback`, `openpgpkey` and the apex at the VM
+  (a `*.` wildcard record covers all but the apex).
 - **An OAuth application** for each login provider you enable. The default is
   [Globus](https://app.globus.org/settings/developers) only; set `GIRDER_OAUTH_PROVIDERS`
   to add or switch to [ORCID](https://orcid.org/developer-tools).
@@ -130,6 +132,7 @@ the volumes are — it is the only thing that notices a leak.
 | `docker-stack.autoscaler.yml` | Fleet-controller overlay, merged only when `SIVACOR_AUTOSCALING` is set |
 | `Makefile` | Deploy and housekeeping targets; also discovers host-specific values |
 | `setup_girder.py` | First-run Girder bootstrap |
+| `build-wkd.sh` | Builds the Web Key Directory tree from the signing key; run by `make wkd` |
 | `worker-cloud-init.sh` | User-data template for fleet worker VMs |
 | `launch-worker.py` | Launch a single worker by hand, for debugging |
 | `ENVIRONMENT.md` | **The configuration reference** |

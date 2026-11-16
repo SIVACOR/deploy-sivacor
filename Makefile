@@ -1,4 +1,4 @@
-.PHONY: clean dirs dev images \
+.PHONY: clean dirs dev images wkd \
 	restart_worker restart_girder status update_src 
 
 SUBDIRS = src volumes/base volumes/licenses volumes/tmp
@@ -59,7 +59,30 @@ $(SUBDIRS):
 	@sudo mkdir -p $@
 	@sudo chown -R $$(id -u):$$(id -g) $@
 
-services: dirs
+# The Web Key Directory the `openpgpkey` service serves (build-wkd.sh has the
+# layout). Rebuilt on every deploy from the deployment's own keyring, so it can
+# only ever publish the key this deployment signs with, and a test mirror never
+# publishes production's.
+#
+# Exported AS THE KEYRING'S OWNER, never as root: gpg may write trustdb or lock
+# files into its homedir, and a root-owned one there would make local_worker
+# (uid 1000) fail at run_tro("sign") -- the same last-step failure `dirs` guards
+# against. Only the public key is exported, so no agent is started.
+#
+# The fingerprint comes from .env, which girder only reads on first setup
+# (ENVIRONMENT.md); if the key is ever rotated through the settings API, update
+# GIRDER_SIVACOR_TRO_GPG_FINGERPRINT too, or this keeps publishing the old one.
+# An unknown fingerprint exports nothing and build-wkd.sh refuses, so a typo
+# stops the deploy instead of publishing an empty directory.
+wkd: dirs
+	@. ./.env; \
+	  g="$${GNUPG_HOSTPATH:-/home/ubuntu/.gnupg}"; \
+	  fpr="$${GIRDER_SIVACOR_TRO_GPG_FINGERPRINT:?is not set in .env}"; \
+	  sudo -u "#$$(sudo stat -c %u "$$g")" gpg --homedir "$$g" --batch \
+	    --export-options export-minimal --export "$$fpr" | \
+	  ./build-wkd.sh "$$domain" volumes/wkd
+
+services: dirs wkd
 
 # Discovered here, not stored in .env: the docker group's GID is a property of THIS
 # host, and a stale value in .env is invisible until analysis containers stop

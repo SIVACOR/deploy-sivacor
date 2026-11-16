@@ -48,7 +48,7 @@ existing `.env` needs none of them.
 | `DOCKER_HOST_TMP_ROOT` | `/home/ubuntu/deploy-sivacor/volumes` | Host path `lib.py` builds sibling-container bind-mount sources from. Matches the production checkout; set it per host if yours differs. A wrong value does not error — Docker creates an empty directory at the missing mount source, and Stata then reports no valid license. |
 | `STATA_LICENSE_HOSTPATH` | `…/deploy-sivacor/volumes/licenses/stata.lic.19` | Same caveat. `setup_girder.py` seeds `sivacor.stata_license` from it on first setup, and leaves the setting out if the file is absent. |
 | `REDIS_DATA_HOSTPATH` | `/home/ubuntu/redis_data` | Host directory holding the broker's data — production's default is where its external volume is mounted. `make dirs` creates it (no `chown`: the redis entrypoint fixes ownership). **Changing it on a live deployment starts the broker on an empty directory**: queued submissions and pending logs are lost unless the data is moved first. |
-| `GNUPG_HOSTPATH` | `/home/ubuntu/.gnupg` | Host GPG keyring holding the TRS signing key, bind-mounted into `local_worker` only — off-box workers hold no key. It is the deployment's identity: every TRO is signed with it. Must be readable by uid 1000. `make dirs` **refuses to deploy** if it is missing rather than creating it, because an empty directory would start fine and fail every submission at `run_tro("sign")`, after the analysis had run. |
+| `GNUPG_HOSTPATH` | `/home/ubuntu/.gnupg` | Host GPG keyring holding the TRS signing key, bind-mounted into `local_worker` only — off-box workers hold no key. It is the deployment's identity: every TRO is signed with it. Must be readable by uid 1000. `make dirs` **refuses to deploy** if it is missing rather than creating it, because an empty directory would start fine and fail every submission at `run_tro("sign")`, after the analysis had run. `make wkd` also exports the public half of `GIRDER_SIVACOR_TRO_GPG_FINGERPRINT` from it on every deploy, for the Web Key Directory (see *Host rules and TLS*). |
 | `GIRDER_SMTP_HOST` / `GIRDER_SMTP_PORT` / `GIRDER_SMTP_ENCRYPTION` | `mail.spacemail.com` / `465` / `ssl` | Outgoing mail relay, for `girder`, `beat` and `local_worker` alike. |
 | `SIVACOR_IMAGE_TAGS_URL` | unset | Seeds `sivacor.image_tags_url` **on first setup only**. Unset leaves it empty, so the deployment never fetches and its allow-list is `sivacor.image_tags`, whose built-in value is stale — curate it on the plugin's config page. **A rebuilt SIVACOR deployment should set it**, preferably to a pinned commit of `sivacor-repo-choice`'s `allowed_repos.yaml`. |
 | `SIVACOR_SUPPORT_EMAIL` | unset | Seeds `sivacor.support_email` **on first setup only**, so a third-party deployment does not send its users to SIVACOR's support. Unset leaves the setting at the plugin default, `support@sivacor.org`; later changes go through the settings API. Not `GIRDER_ADMIN_EMAIL`, which is the mail sender. |
@@ -134,6 +134,25 @@ consulted, which is how the old file-provider version worked with a service that
 had zero servers. They also no longer carry their own `certResolver` — the
 wildcard covers both the apex (as `main`) and `feedback.$domain` (as `*.`), so
 this is two fewer certificates to issue.
+
+`openpgpkey.$domain` serves the **Web Key Directory** (SIVACOR/documentation#36):
+the TRS signing key, cut to one user ID per file, under
+`/.well-known/openpgpkey/$domain/hu/`, so a verifier can run
+`gpg --locate-external-keys editors@sivacor.org` and get the key from the domain
+rather than from the TRO it is checking. Three things to know:
+
+- It must be the `openpgpkey.` subdomain, not the apex. The `*.` record makes that
+  name resolve, and once it does gpg uses only the subdomain URL and never falls
+  back (checked with gpg 2.4.4) — the apex is GitHub Pages on production anyway.
+- `make wkd` (part of `make dev`) rebuilds the tree in `volumes/wkd/` from **this
+  deployment's** keyring and `GIRDER_SIVACOR_TRO_GPG_FINGERPRINT`, and publishes
+  only user IDs at `$domain`. The test mirror's addresses are not at
+  `test.sivacor.org`, so it publishes none and answers 404 — correct, since it is
+  not the authority for them.
+- The fingerprint is read from `.env`, which Girder itself reads only on first
+  setup. **After rotating the key through the settings API, update `.env` too**, or
+  the directory keeps publishing the old key. Check after any deploy with
+  `gpg --auto-key-locate clear,wkd,nodefault --locate-external-keys editors@$domain`.
 
 ## Docker socket access — the host's GID, discovered at deploy time
 
